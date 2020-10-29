@@ -81,6 +81,20 @@ These are all gone, and replaced with the following set of configurations:
 Logging and Metrics
 -------------------
 
+In addition to logging indivdiual headers, we now have comparable log tags that dumbs
+the entire header. This table shows the additions, and what they correspond with.
+
+============== ===================
+Original Field All Headers Variant
+============== ===================
+cqh            cqah
+pqh            pqah
+psh            psah
+ssh            ssah
+cssh           cssah
+============== ===================
+
+
 Plugins
 -------
 
@@ -98,3 +112,15 @@ new prototype is:
 .. code-block:: c
 
     .. c:function:: TSReturnCode TSHttpTxnServerPush(TSHttpTxn txnp, const char *url, int url_len);
+
+A new set of APIs for scheduling continuations on a specific set of threads has been added:
+
+.. code-block:: c
+    .. c:function:: TSAction TSContScheduleOnPool(TSCont contp, TSHRTime timeout, TSThreadPool tp);
+    .. c:function:: TSAction TSContScheduleOnThread(TSCont contp, TSHRTime timeout, TSEventThread ethread);
+
+
+There is a new API for redoing a cache lookup, typically after a URL change, or cache key update:
+
+.. code-block:: c
+    .. c:function:: TSReturnCode TSHttpTxnRedoCacheLookup(TSHttpTxn txnp, const char *url, int length)
