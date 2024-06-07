@@ -64,9 +64,13 @@ public:
   //
   enum Operator {
     MATCH = 0,
+    MATCH_NOT,
     CASE_INSENSITIVE_MATCH,
+    CASE_INSENSITIVE_MATCH_NOT,
     CONTAIN,
+    CONTAIN_NOT,
     CASE_INSENSITIVE_CONTAIN,
+    CASE_INSENSITIVE_CONTAIN_NOT,
     N_OPERATORS,
   };
 
@@ -171,7 +175,7 @@ private:
   inline bool _checkCondition(OperatorFunction f, const char *field_value, size_t field_value_length, char **val,
                               LengthCondition lc);
 
-  inline bool _checkConditionAndWipe(OperatorFunction f, char **field_value, size_t field_value_length, char **val,
+  inline bool _checkConditionAndWipe(OperatorFunction f, bool invert, char **field_value, size_t field_value_length, char **val,
                                      const char *uppercase_field_value, LengthCondition lc);
 
   // -- member functions that are not allowed --
@@ -501,7 +505,7 @@ wipeField(char **field, char *pattern, const char *uppercase_field)
     ------------------------------------------------------------------------*/
 
 inline bool
-LogFilterString::_checkConditionAndWipe(OperatorFunction f, char **field_value, size_t field_value_length, char **val,
+LogFilterString::_checkConditionAndWipe(OperatorFunction f, bool invert, char **field_value, size_t field_value_length, char **val,
                                         const char *uppercase_field_value, LengthCondition lc)
 {
   bool retVal = false;
@@ -557,5 +561,6 @@ LogFilterString::_checkConditionAndWipe(OperatorFunction f, char **field_value, 
                   "unknown LengthConditionAndWipe");
     }
   }
-  return retVal;
+
+  return invert ? retVal : !retVal;
 }

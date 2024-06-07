@@ -46,7 +46,8 @@
 #include "proxy/logging/LogConfig.h"
 #include "proxy/logging/Log.h"
 
-const char *LogFilter::OPERATOR_NAME[] = {"MATCH", "CASE_INSENSITIVE_MATCH", "CONTAIN", "CASE_INSENSITIVE_CONTAIN"};
+const char *LogFilter::OPERATOR_NAME[] = {"MATCH",   "MATCH_NOT",   "CASE_INSENSITIVE_MATCH",    "CASE_INSENSITIVE_MATCH_NOT",
+                                          "CONTAIN", "CONTAIN_NOT", "CASE_INSENSITIVE_CONTAIN ", "CASE_INSENSITIVE_CONTAIN_NOT"};
 const char *LogFilter::ACTION_NAME[]   = {"REJECT", "ACCEPT", "WIPE_FIELD_VALUE"};
 
 namespace
@@ -346,7 +347,11 @@ LogFilterString::wipe_this_entry(LogAccess *lad)
   ink_assert(buf != nullptr);
 
   bool cond_satisfied = false;
+  bool invert         = false;
+
   switch (m_operator) {
+  case MATCH_NOT:
+    invert = true;
   case MATCH:
     // marsh_len is an upper bound on the length of the marshalled string
     // because marsh_len counts padding and the eos. So for a MATCH
@@ -356,14 +361,20 @@ LogFilterString::wipe_this_entry(LogAccess *lad)
     // actual length, so we just use the fact that a MATCH is not possible
     // when marsh_len <= (length of the filter string)
     //
-    cond_satisfied = _checkConditionAndWipe(&strcmp, &buf, marsh_len, m_value, nullptr, DATA_LENGTH_LARGER);
+    cond_satisfied = _checkConditionAndWipe(&strcmp, invert, &buf, marsh_len, m_value, nullptr, DATA_LENGTH_LARGER);
     break;
+  case CASE_INSENSITIVE_MATCH_NOT:
+    invert = true;
   case CASE_INSENSITIVE_MATCH:
-    cond_satisfied = _checkConditionAndWipe(&strcasecmp, &buf, marsh_len, m_value, nullptr, DATA_LENGTH_LARGER);
+    cond_satisfied = _checkConditionAndWipe(&strcasecmp, invert, &buf, marsh_len, m_value, nullptr, DATA_LENGTH_LARGER);
     break;
+  case CONTAIN_NOT:
+    invert = true;
   case CONTAIN:
-    cond_satisfied = _checkConditionAndWipe(&_isSubstring, &buf, marsh_len, m_value, nullptr, DATA_LENGTH_LARGER);
+    cond_satisfied = _checkConditionAndWipe(&_isSubstring, invert, &buf, marsh_len, m_value, nullptr, DATA_LENGTH_LARGER);
     break;
+  case CASE_INSENSITIVE_CONTAIN_NOT:
+    invert = true;
   case CASE_INSENSITIVE_CONTAIN:
     if (big_buf) {
       big_buf_upper = static_cast<char *>(ats_malloc(static_cast<unsigned int>(marsh_len)));
@@ -374,7 +385,8 @@ LogFilterString::wipe_this_entry(LogAccess *lad)
     for (size_t i = 0; i < marsh_len; i++) {
       buf_upper[i] = ParseRules::ink_toupper(buf[i]);
     }
-    cond_satisfied = _checkConditionAndWipe(&_isSubstring, &buf, marsh_len, m_value_uppercase, buf_upper, DATA_LENGTH_LARGER);
+    cond_satisfied =
+      _checkConditionAndWipe(&_isSubstring, invert, &buf, marsh_len, m_value_uppercase, buf_upper, DATA_LENGTH_LARGER);
     break;
   default:
     ink_assert(!"INVALID FILTER OPERATOR");

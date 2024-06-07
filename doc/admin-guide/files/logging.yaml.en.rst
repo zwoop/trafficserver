@@ -194,21 +194,23 @@ Filter Operators
 The operators describe how to perform the matching in the filter rule, and may
 be any one of the following:
 
-``MATCH``
+``MATCH`` and ``MATCH_NOT``
     True if the values of ``field`` and ``value`` are identical.
     Case-sensitive.
 
-``CASE_INSENSITIVE_MATCH``
+``CASE_INSENSITIVE_MATCH`` and ``CASE_INSENSITIVE_MATCH_NOT``
     True if the values of ``field`` and ``value`` are identical.
     Case-insensitive.
 
-``CONTAIN``
+``CONTAIN`` and ``CONTAIN_NOT``
     True if the value of ``field`` contains ``value`` (i.e. ``value`` is a
     substring of the contents of ``field``). Case-sensitive.
 
-``CASE_INSENSITIVE_CONTAIN``
+``CASE_INSENSITIVE_CONTAIN`` and ``CASE_INSENSITIVE_CONTAIN_NOT``:
     True if the value of ``field`` contains ``value`` (i.e. ``value`` is a
     substring of the contents of ``field``). Case-insensitive.
+
+.. note: The operators ending with a ``_NOT`` suffix are the negation of the operator.
 
 Filter Values
 ~~~~~~~~~~~~~
