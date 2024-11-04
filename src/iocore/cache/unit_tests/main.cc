@@ -296,7 +296,7 @@ CacheWriteTest::start_test(int /* event ATS_UNUSED */, void * /* e ATS_UNUSED */
   }
 
   SET_HANDLER(&CacheWriteTest::write_event);
-  cacheProcessor.open_write(this, 0, &key, static_cast<CacheHTTPHdr *>(this->info.request_get()), old_info);
+  cacheProcessor.open_write(this, 0, &key, static_cast<CacheHTTPHdr *>(this->info.request_get()), old_info, -1);
   return 0;
 }
 

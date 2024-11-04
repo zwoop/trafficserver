@@ -907,6 +907,7 @@ HttpConfig::startup()
   HttpEstablishStaticConfigLongLong(c.oride.max_cache_open_read_retries, "proxy.config.http.cache.max_open_read_retries");
   HttpEstablishStaticConfigLongLong(c.oride.cache_open_read_retry_time, "proxy.config.http.cache.open_read_retry_time");
   HttpEstablishStaticConfigLongLong(c.oride.cache_generation_number, "proxy.config.http.cache.generation");
+  HttpEstablishStaticConfigLongLong(c.oride.cache_preferred_volume, "proxy.config.http.cache.preferred_volume");
 
   // open write failure retries
   HttpEstablishStaticConfigLongLong(c.oride.max_cache_open_write_retries, "proxy.config.http.cache.max_open_write_retries");
@@ -1202,6 +1203,7 @@ HttpConfig::reconfigure()
   params->oride.max_cache_open_read_retries = m_master.oride.max_cache_open_read_retries;
   params->oride.cache_open_read_retry_time  = m_master.oride.cache_open_read_retry_time;
   params->oride.cache_generation_number     = m_master.oride.cache_generation_number;
+  params->oride.cache_preferred_volume      = m_master.oride.cache_preferred_volume;
 
   // open write failure retries
   params->oride.max_cache_open_write_retries = m_master.oride.max_cache_open_write_retries;

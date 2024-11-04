@@ -549,6 +549,8 @@ static const RecordElement RecordsConfig[] =
   ,
   {RECT_CONFIG, "proxy.config.http.cache.generation", RECD_INT, "-1", RECU_DYNAMIC, RR_NULL, RECC_NULL, nullptr, RECA_NULL}
   ,
+  {RECT_CONFIG, "proxy.config.http.cache.preferred_volume", RECD_INT, "-1", RECU_DYNAMIC, RR_NULL, RECC_NULL, nullptr, RECA_NULL}
+  ,
   {RECT_CONFIG, "proxy.config.http.cache.ignore_client_no_cache", RECD_INT, "1", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]", RECA_NULL}
   ,
   {RECT_CONFIG, "proxy.config.http.cache.ignore_client_cc_max_age", RECD_INT, "1", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]", RECA_NULL}

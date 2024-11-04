@@ -244,6 +244,12 @@ public:
   {
     return "";
   }
+
+  int
+  get_preferred_volume() const override
+  {
+    return -1;
+  }
 };
 
 class CacheReadTest : public CacheTestBase

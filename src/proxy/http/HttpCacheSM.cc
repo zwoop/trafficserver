@@ -267,7 +267,7 @@ HttpCacheSM::state_cache_open_write(int event, void *data)
       // than or equal to the max number of open write retries
       ink_assert(!write_retry_done());
 
-      open_write(&cache_key, lookup_url, read_request_hdr, master_sm->t_state.cache_info.object_read,
+      open_write(&cache_key, lookup_url, read_request_hdr, master_sm->t_state.cache_info.object_read, master_sm->t_state.txn_conf,
                  static_cast<time_t>(
                    (master_sm->t_state.cache_control.pin_in_cache_for < 0) ? 0 : master_sm->t_state.cache_control.pin_in_cache_for),
                  retry_write, false);
@@ -362,13 +362,14 @@ HttpCacheSM::open_read(const HttpCacheKey *key, URL *url, HTTPHdr *hdr, const Ov
 }
 
 Action *
-HttpCacheSM::open_write(const HttpCacheKey *key, URL *url, HTTPHdr *request, CacheHTTPInfo *old_info, time_t pin_in_cache,
-                        bool retry, bool allow_multiple)
+HttpCacheSM::open_write(const HttpCacheKey *key, URL *url, HTTPHdr *request, CacheHTTPInfo *old_info,
+                        const OverridableHttpConfigParams *params, time_t pin_in_cache, bool retry, bool allow_multiple)
 {
   SET_HANDLER(&HttpCacheSM::state_cache_open_write);
   ink_assert(pending_action == nullptr);
   ink_assert((cache_write_vc == nullptr) || master_sm->t_state.redirect_info.redirect_in_process);
   // INKqa12119
+  http_params   = params;
   open_write_cb = false;
   open_write_tries++;
   if (0 == open_write_start) {
@@ -397,10 +398,10 @@ HttpCacheSM::open_write(const HttpCacheKey *key, URL *url, HTTPHdr *request, Cac
     return ACTION_RESULT_DONE;
   }
 
-  Action *action_handle =
-    cacheProcessor.open_write(this, 0, key, request,
-                              // INKqa11166
-                              allow_multiple ? (CacheHTTPInfo *)CACHE_ALLOW_MULTIPLE_WRITES : old_info, pin_in_cache);
+  Action *action_handle = cacheProcessor.open_write(this, 0, key, request,
+                                                    // INKqa11166
+                                                    allow_multiple ? (CacheHTTPInfo *)CACHE_ALLOW_MULTIPLE_WRITES : old_info,
+                                                    http_params.get_preferred_volume(), pin_in_cache);
 
   if (action_handle != ACTION_RESULT_DONE) {
     pending_action = action_handle;

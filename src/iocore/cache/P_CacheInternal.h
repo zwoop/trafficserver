@@ -462,17 +462,17 @@ struct Cache {
   int open(bool reconfigure, bool fix);
   int close();
 
-  Action *lookup(Continuation *cont, const CacheKey *key, CacheFragType type, const char *hostname, int host_len);
-  Action *open_read(Continuation *cont, const CacheKey *key, CacheFragType type, const char *hostname, int len);
-  Action *open_write(Continuation *cont, const CacheKey *key, CacheFragType frag_type, int options = 0, time_t pin_in_cache = 0,
-                     const char *hostname = nullptr, int host_len = 0);
-  Action *remove(Continuation *cont, const CacheKey *key, CacheFragType type = CACHE_FRAG_TYPE_HTTP, const char *hostname = nullptr,
-                 int host_len = 0);
+  Action *lookup(Continuation *cont, const CacheKey *key, CacheFragType type, const char *hostname, int host_len, int volume);
+  Action *open_read(Continuation *cont, const CacheKey *key, CacheFragType type, const char *hostname, int len, int volume);
+  Action *open_write(Continuation *cont, const CacheKey *key, CacheFragType frag_type, int volume, int options = 0,
+                     time_t pin_in_cache = 0, const char *hostname = nullptr, int host_len = 0);
+  Action *remove(Continuation *cont, const CacheKey *key, int volume, CacheFragType type = CACHE_FRAG_TYPE_HTTP,
+                 const char *hostname = nullptr, int host_len = 0);
   Action *scan(Continuation *cont, const char *hostname = nullptr, int host_len = 0, int KB_per_second = 2500);
 
   Action     *open_read(Continuation *cont, const CacheKey *key, CacheHTTPHdr *request, const HttpConfigAccessor *params,
                         CacheFragType type, const char *hostname, int host_len);
-  Action     *open_write(Continuation *cont, const CacheKey *key, CacheHTTPInfo *old_info, time_t pin_in_cache = 0,
+  Action     *open_write(Continuation *cont, const CacheKey *key, CacheHTTPInfo *old_info, int volume, time_t pin_in_cache = 0,
                          const CacheKey *key1 = nullptr, CacheFragType type = CACHE_FRAG_TYPE_HTTP, const char *hostname = nullptr,
                          int host_len = 0);
   static void generate_key(CryptoHash *hash, CacheURL *url);
@@ -482,7 +482,7 @@ struct Cache {
 
   int open_done();
 
-  StripeSM *key_to_stripe(const CacheKey *key, const char *hostname, int host_len);
+  StripeSM *key_to_stripe(const CacheKey *key, const char *hostname, int host_len, int volume);
 
   Cache() {}
 };

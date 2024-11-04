@@ -368,29 +368,32 @@ CacheProcessor::dir_check(bool /* afix ATS_UNUSED */)
 }
 
 Action *
-CacheProcessor::lookup(Continuation *cont, const CacheKey *key, CacheFragType frag_type, const char *hostname, int host_len)
+CacheProcessor::lookup(Continuation *cont, const CacheKey *key, int volume, CacheFragType frag_type, const char *hostname,
+                       int host_len)
 {
-  return caches[frag_type]->lookup(cont, key, frag_type, hostname, host_len);
+  return caches[frag_type]->lookup(cont, key, frag_type, hostname, host_len, volume);
 }
 
 Action *
-CacheProcessor::open_read(Continuation *cont, const CacheKey *key, CacheFragType frag_type, const char *hostname, int hostlen)
+CacheProcessor::open_read(Continuation *cont, const CacheKey *key, int volume, CacheFragType frag_type, const char *hostname,
+                          int hostlen)
 {
-  return caches[frag_type]->open_read(cont, key, frag_type, hostname, hostlen);
+  return caches[frag_type]->open_read(cont, key, frag_type, hostname, hostlen, volume);
 }
 
 Action *
-CacheProcessor::open_write(Continuation *cont, CacheKey *key, CacheFragType frag_type, int expected_size ATS_UNUSED, int options,
-                           time_t pin_in_cache, char *hostname, int host_len)
+CacheProcessor::open_write(Continuation *cont, CacheKey *key, int volume, CacheFragType frag_type, int expected_size ATS_UNUSED,
+                           int options, time_t pin_in_cache, char *hostname, int host_len)
 {
-  return caches[frag_type]->open_write(cont, key, frag_type, options, pin_in_cache, hostname, host_len);
+  return caches[frag_type]->open_write(cont, key, frag_type, volume, options, pin_in_cache, hostname, host_len);
 }
 
 Action *
-CacheProcessor::remove(Continuation *cont, const CacheKey *key, CacheFragType frag_type, const char *hostname, int host_len)
+CacheProcessor::remove(Continuation *cont, const CacheKey *key, int volume, CacheFragType frag_type, const char *hostname,
+                       int host_len)
 {
   Dbg(dbg_ctl_cache_remove, "[CacheProcessor::remove] Issuing cache delete for %u", cache_hash(*key));
-  return caches[frag_type]->remove(cont, key, frag_type, hostname, host_len);
+  return caches[frag_type]->remove(cont, key, volume, frag_type, hostname, host_len);
 }
 
 Action *
@@ -400,9 +403,9 @@ CacheProcessor::scan(Continuation *cont, char *hostname, int host_len, int KB_pe
 }
 
 Action *
-CacheProcessor::lookup(Continuation *cont, const HttpCacheKey *key, CacheFragType frag_type)
+CacheProcessor::lookup(Continuation *cont, const HttpCacheKey *key, int volume, CacheFragType frag_type)
 {
-  return lookup(cont, &key->hash, frag_type, key->hostname, key->hostlen);
+  return lookup(cont, &key->hash, volume, frag_type, key->hostname, key->hostlen);
 }
 
 //----------------------------------------------------------------------------
@@ -416,19 +419,20 @@ CacheProcessor::open_read(Continuation *cont, const HttpCacheKey *key, CacheHTTP
 //----------------------------------------------------------------------------
 Action *
 CacheProcessor::open_write(Continuation *cont, int /* expected_size ATS_UNUSED */, const HttpCacheKey *key,
-                           CacheHTTPHdr * /* request ATS_UNUSED */, CacheHTTPInfo *old_info, time_t pin_in_cache,
+                           CacheHTTPHdr * /* request ATS_UNUSED */, CacheHTTPInfo *old_info, int volume, time_t pin_in_cache,
                            CacheFragType type)
 {
-  return caches[type]->open_write(cont, &key->hash, old_info, pin_in_cache, nullptr /* key1 */, type, key->hostname, key->hostlen);
+  return caches[type]->open_write(cont, &key->hash, old_info, volume, pin_in_cache, nullptr /* key1 */, type, key->hostname,
+                                  key->hostlen);
 }
 
 //----------------------------------------------------------------------------
 // Note: this should not be called from the cluster processor, or bad
 // recursion could occur. This is merely a convenience wrapper.
 Action *
-CacheProcessor::remove(Continuation *cont, const HttpCacheKey *key, CacheFragType frag_type)
+CacheProcessor::remove(Continuation *cont, const HttpCacheKey *key, int volume, CacheFragType frag_type)
 {
-  return caches[frag_type]->remove(cont, &key->hash, frag_type, key->hostname, key->hostlen);
+  return caches[frag_type]->remove(cont, &key->hash, volume, frag_type, key->hostname, key->hostlen);
 }
 
 /** Set the state of a disk programmatically.

@@ -301,14 +301,14 @@ Cache::close()
 }
 
 Action *
-Cache::lookup(Continuation *cont, const CacheKey *key, CacheFragType type, const char *hostname, int host_len)
+Cache::lookup(Continuation *cont, const CacheKey *key, CacheFragType type, const char *hostname, int host_len, int volume)
 {
   if (!CacheProcessor::IsCacheReady(type)) {
     cont->handleEvent(CACHE_EVENT_LOOKUP_FAILED, nullptr);
     return ACTION_RESULT_DONE;
   }
 
-  StripeSM *stripe = key_to_stripe(key, hostname, host_len);
+  StripeSM *stripe = key_to_stripe(key, hostname, host_len, volume);
   CacheVC  *c      = new_CacheVC(cont);
   SET_CONTINUATION_HANDLER(c, &CacheVC::openReadStartHead);
   c->vio.op  = VIO::READ;
@@ -329,7 +329,7 @@ Cache::lookup(Continuation *cont, const CacheKey *key, CacheFragType type, const
 }
 
 Action *
-Cache::open_read(Continuation *cont, const CacheKey *key, CacheFragType type, const char *hostname, int host_len)
+Cache::open_read(Continuation *cont, const CacheKey *key, CacheFragType type, const char *hostname, int host_len, int volume)
 {
   if (!CacheProcessor::IsCacheReady(type)) {
     cont->handleEvent(CACHE_EVENT_OPEN_READ_FAILED, reinterpret_cast<void *>(-ECACHE_NOT_READY));
@@ -337,7 +337,7 @@ Cache::open_read(Continuation *cont, const CacheKey *key, CacheFragType type, co
   }
   ink_assert(caches[type] == this);
 
-  StripeSM     *stripe = key_to_stripe(key, hostname, host_len);
+  StripeSM     *stripe = key_to_stripe(key, hostname, host_len, volume);
   Dir           result, *last_collision = nullptr;
   ProxyMutex   *mutex = cont->mutex.get();
   OpenDirEntry *od    = nullptr;
@@ -397,7 +397,7 @@ Lcallreturn:
 
 // main entry point for writing of non-http documents
 Action *
-Cache::open_write(Continuation *cont, const CacheKey *key, CacheFragType frag_type, int options, time_t apin_in_cache,
+Cache::open_write(Continuation *cont, const CacheKey *key, CacheFragType frag_type, int volume, int options, time_t apin_in_cache,
                   const char *hostname, int host_len)
 {
   if (!CacheProcessor::IsCacheReady(frag_type)) {
@@ -412,7 +412,7 @@ Cache::open_write(Continuation *cont, const CacheKey *key, CacheFragType frag_ty
   SCOPED_MUTEX_LOCK(lock, c->mutex, this_ethread());
   c->vio.op        = VIO::WRITE;
   c->op_type       = static_cast<int>(CacheOpType::Write);
-  c->stripe        = key_to_stripe(key, hostname, host_len);
+  c->stripe        = key_to_stripe(key, hostname, host_len, volume);
   StripeSM *stripe = c->stripe;
   Metrics::Gauge::increment(cache_rsb.status[c->op_type].active);
   Metrics::Gauge::increment(stripe->cache_vol->vol_rsb.status[c->op_type].active);
@@ -464,7 +464,7 @@ Cache::open_write(Continuation *cont, const CacheKey *key, CacheFragType frag_ty
 }
 
 Action *
-Cache::remove(Continuation *cont, const CacheKey *key, CacheFragType type, const char *hostname, int host_len)
+Cache::remove(Continuation *cont, const CacheKey *key, int volume, CacheFragType type, const char *hostname, int host_len)
 {
   if (!CacheProcessor::IsCacheReady(type)) {
     if (cont) {
@@ -480,7 +480,7 @@ Cache::remove(Continuation *cont, const CacheKey *key, CacheFragType type, const
 
   CACHE_TRY_LOCK(lock, cont->mutex, this_ethread());
   ink_assert(lock.is_locked());
-  StripeSM *stripe = key_to_stripe(key, hostname, host_len);
+  StripeSM *stripe = key_to_stripe(key, hostname, host_len, volume);
   // coverity[var_decl]
   Dir result;
   dir_clear(&result); // initialized here, set result empty so we can recognize missed lock
@@ -540,7 +540,7 @@ Cache::open_read(Continuation *cont, const CacheKey *key, CacheHTTPHdr *request,
   }
   ink_assert(caches[type] == this);
 
-  StripeSM     *stripe = key_to_stripe(key, hostname, host_len);
+  StripeSM     *stripe = key_to_stripe(key, hostname, host_len, params->get_preferred_volume());
   Dir           result, *last_collision = nullptr;
   ProxyMutex   *mutex = cont->mutex.get();
   OpenDirEntry *od    = nullptr;
@@ -606,7 +606,7 @@ Lcallreturn:
 
 // main entry point for writing of http documents
 Action *
-Cache::open_write(Continuation *cont, const CacheKey *key, CacheHTTPInfo *info, time_t apin_in_cache,
+Cache::open_write(Continuation *cont, const CacheKey *key, CacheHTTPInfo *info, int volume, time_t pin_in_cache,
                   const CacheKey * /* key1 ATS_UNUSED */, CacheFragType type, const char *hostname, int host_len)
 {
   if (!CacheProcessor::IsCacheReady(type)) {
@@ -632,7 +632,7 @@ Cache::open_write(Continuation *cont, const CacheKey *key, CacheHTTPInfo *info, 
   } while (DIR_MASK_TAG(c->key.slice32(2)) == DIR_MASK_TAG(c->first_key.slice32(2)));
   c->earliest_key  = c->key;
   c->frag_type     = CACHE_FRAG_TYPE_HTTP;
-  c->stripe        = key_to_stripe(key, hostname, host_len);
+  c->stripe        = key_to_stripe(key, hostname, host_len, volume);
   StripeSM *stripe = c->stripe;
   c->info          = info;
   if (c->info && reinterpret_cast<uintptr_t>(info) != CACHE_ALLOW_MULTIPLE_WRITES) {
@@ -677,7 +677,7 @@ Cache::open_write(Continuation *cont, const CacheKey *key, CacheHTTPInfo *info, 
   Metrics::Gauge::increment(cache_rsb.status[c->op_type].active);
   Metrics::Gauge::increment(stripe->cache_vol->vol_rsb.status[c->op_type].active);
   // coverity[Y2K38_SAFETY:FALSE]
-  c->pin_in_cache = static_cast<uint32_t>(apin_in_cache);
+  c->pin_in_cache = static_cast<uint32_t>(pin_in_cache);
 
   {
     CACHE_TRY_LOCK(lock, c->stripe->mutex, cont->mutex->thread_holding);
@@ -748,35 +748,29 @@ CacheVConnection::CacheVConnection() : VConnection(nullptr) {}
 
 // if generic_host_rec.stripes == nullptr, what do we do???
 StripeSM *
-Cache::key_to_stripe(const CacheKey *key, const char *hostname, int host_len)
+Cache::key_to_stripe(const CacheKey *key, const char *hostname, int host_len, int volume)
 {
   ReplaceablePtr<CacheHostTable>::ScopedReader hosttable(&this->hosttable);
-
-  uint32_t               h          = (key->slice32(2) >> DIR_TAG_WIDTH) % STRIPE_HASH_TABLE_SIZE;
-  unsigned short        *hash_table = hosttable->gen_host_rec.vol_hash_table;
-  const CacheHostRecord *host_rec   = &hosttable->gen_host_rec;
+  uint32_t                                     h = (key->slice32(2) >> DIR_TAG_WIDTH) % STRIPE_HASH_TABLE_SIZE;
 
   if (hosttable->m_numEntries > 0 && host_len) {
     CacheHostResult res;
+
     hosttable->Match(hostname, host_len, &res);
     if (res.record) {
       unsigned short *host_hash_table = res.record->vol_hash_table;
       if (host_hash_table) {
-        if (dbg_ctl_cache_hosting.on()) {
-          char format_str[50];
-          snprintf(format_str, sizeof(format_str), "Volume: %%xd for host: %%.%ds", host_len);
-          Dbg(dbg_ctl_cache_hosting, format_str, res.record, hostname);
-        }
+        Dbg(dbg_ctl_cache_hosting, "Volume: %px for host: %.*s, preferred volume: %d", res.record, host_len, hostname, volume);
         return res.record->stripes[host_hash_table[h]];
       }
     }
   }
+
+  unsigned short        *hash_table = hosttable->gen_host_rec.vol_hash_table;
+  const CacheHostRecord *host_rec   = &hosttable->gen_host_rec;
+
   if (hash_table) {
-    if (dbg_ctl_cache_hosting.on()) {
-      char format_str[50];
-      snprintf(format_str, sizeof(format_str), "Generic volume: %%xd for host: %%.%ds", host_len);
-      Dbg(dbg_ctl_cache_hosting, format_str, host_rec, hostname);
-    }
+    Dbg(dbg_ctl_cache_hosting, "Volume: %px for host: %.*s, preferred volume: %d", host_rec, host_len, hostname, volume);
     return host_rec->stripes[hash_table[h]];
   } else {
     return host_rec->stripes[0];

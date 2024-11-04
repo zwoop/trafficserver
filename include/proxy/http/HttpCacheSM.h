@@ -68,8 +68,8 @@ public:
   Action *open_read(const HttpCacheKey *key, URL *url, HTTPHdr *hdr, const OverridableHttpConfigParams *params,
                     time_t pin_in_cache);
 
-  Action *open_write(const HttpCacheKey *key, URL *url, HTTPHdr *request, CacheHTTPInfo *old_info, time_t pin_in_cache, bool retry,
-                     bool allow_multiple);
+  Action *open_write(const HttpCacheKey *key, URL *url, HTTPHdr *request, CacheHTTPInfo *old_info,
+                     const OverridableHttpConfigParams *params, time_t pin_in_cache, bool retry, bool allow_multiple);
 
   CacheVConnection *cache_read_vc  = nullptr;
   CacheVConnection *cache_write_vc = nullptr;
@@ -239,6 +239,12 @@ private:
     get_global_user_agent_header() const override
     {
       return this->_params->global_user_agent_header;
+    }
+
+    int
+    get_preferred_volume() const override
+    {
+      return this->_params->cache_preferred_volume;
     }
 
   private:

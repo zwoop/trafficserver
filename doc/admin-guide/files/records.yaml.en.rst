@@ -2213,6 +2213,19 @@ Cache Control
    used to purge the entire cache, or just a specific :file:`remap.config`
    rule.
 
+.. ts:cv:: CONFIG proxy.config.http.cache.preferred_volume INT -1
+   :reloadable:
+   :overridable:
+
+   As an alternative to using the :file:`hosting.config` file to specify the
+   volume, this overridable configuration option can be used. It's unlikely
+   that you would set this in :file::`records.yaml` directly, but rather set
+   it using using a plugin or remap rule.
+
+   The benefit here is that there is no additional lookup cost finding the
+   preferred volume for the request, as it's already specified in the
+   transaction parameters.
+
 .. ts:cv:: CONFIG proxy.config.http.cache.ignore_query INT 0
    :reloadable:
    :overridable:

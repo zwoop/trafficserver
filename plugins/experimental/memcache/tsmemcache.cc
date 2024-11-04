@@ -484,7 +484,7 @@ MC::get_item()
 {
   TS_PUSH_HANDLER(&MC::cache_read_event);
   CryptoContext().hash_immediate(cache_key, (void *)key, (int)header.nkey);
-  pending_action = cacheProcessor.open_read(this, &cache_key);
+  pending_action = cacheProcessor.open_read(this, &cache_key, -1);
   return EVENT_CONT;
 }
 
@@ -492,7 +492,7 @@ int
 MC::set_item()
 {
   CryptoContext().hash_immediate(cache_key, (void *)key, (int)header.nkey);
-  pending_action = cacheProcessor.open_write(this, &cache_key, CACHE_FRAG_TYPE_NONE, header.nbytes,
+  pending_action = cacheProcessor.open_write(this, &cache_key, -1, CACHE_FRAG_TYPE_NONE, -1, header.nbytes,
                                              CACHE_WRITE_OPT_OVERWRITE | TSMEMCACHE_WRITE_SYNC);
   return EVENT_CONT;
 }

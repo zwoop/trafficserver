@@ -6219,7 +6219,8 @@ TSCacheRead(TSCont contp, TSCacheKey key)
   CacheInfo    *info = (CacheInfo *)key;
   Continuation *i    = (INKContInternal *)contp;
 
-  return (TSAction)cacheProcessor.open_read(i, &info->cache_key, info->frag_type, info->hostname, info->len);
+  // ToDo: We don't have any way to pass the preferred volume here
+  return (TSAction)cacheProcessor.open_read(i, &info->cache_key, -1, info->frag_type, info->hostname, info->len);
 }
 
 TSAction
@@ -6233,7 +6234,8 @@ TSCacheWrite(TSCont contp, TSCacheKey key)
   CacheInfo    *info = (CacheInfo *)key;
   Continuation *i    = (INKContInternal *)contp;
 
-  return (TSAction)cacheProcessor.open_write(i, &info->cache_key, info->frag_type, 0, false, info->pin_in_cache, info->hostname,
+  // ToDo: There's no way to signal preferred volume here ...
+  return (TSAction)cacheProcessor.open_write(i, &info->cache_key, -1, info->frag_type, 0, false, info->pin_in_cache, info->hostname,
                                              info->len);
 }
 
@@ -6248,7 +6250,8 @@ TSCacheRemove(TSCont contp, TSCacheKey key)
   CacheInfo       *info = (CacheInfo *)key;
   INKContInternal *i    = (INKContInternal *)contp;
 
-  return (TSAction)cacheProcessor.remove(i, &info->cache_key, info->frag_type, info->hostname, info->len);
+  // ToDo: No way to pass in the preferred volume here
+  return (TSAction)cacheProcessor.remove(i, &info->cache_key, -1, info->frag_type, info->hostname, info->len);
 }
 
 TSAction
@@ -7465,6 +7468,9 @@ _conf_to_memberp(TSOverridableConfigKey conf, OverridableHttpConfigParams *overr
     break;
   case TS_CONFIG_HTTP_CACHE_CACHE_URLS_THAT_LOOK_DYNAMIC:
     ret = _memberp_to_generic(&overridableHttpConfig->cache_urls_that_look_dynamic, conv);
+    break;
+  case TS_CONFIG_HTTP_CACHE_PREFERRED_VOLUME:
+    ret = _memberp_to_generic(&overridableHttpConfig->cache_preferred_volume, conv);
     break;
 
   // This helps avoiding compiler warnings, yet detect unhandled enum members.

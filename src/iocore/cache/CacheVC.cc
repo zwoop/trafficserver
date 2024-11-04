@@ -826,7 +826,8 @@ CacheVC::scanObject(int /* event ATS_UNUSED */, Event * /* e ATS_UNUSED */)
         ink_assert(hostinfo_copied);
         SET_HANDLER(&CacheVC::scanRemoveDone);
         // force remove even if there is a writer
-        cacheProcessor.remove(this, &doc->first_key, CACHE_FRAG_TYPE_HTTP, hname, hlen);
+        // ToDo: How do we get the preferred volume here ??
+        cacheProcessor.remove(this, &doc->first_key, -1, CACHE_FRAG_TYPE_HTTP, hname, hlen);
         return EVENT_CONT;
       } else {
         offset            = reinterpret_cast<char *>(doc) - buf->data();

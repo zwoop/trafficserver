@@ -5006,7 +5006,7 @@ HttpSM::do_cache_delete_all_alts(Continuation *cont)
   HttpCacheKey key;
   Cache::generate_key(&key, t_state.cache_info.lookup_url, t_state.txn_conf->cache_ignore_query,
                       t_state.txn_conf->cache_generation_number);
-  pending_action = cacheProcessor.remove(cont, &key);
+  pending_action = cacheProcessor.remove(cont, &key, t_state.http_config_param->oride.cache_preferred_volume);
 
   return;
 }
@@ -5087,7 +5087,7 @@ HttpSM::do_cache_prepare_action(HttpCacheSM *c_sm, CacheHTTPInfo *object_read_in
   Cache::generate_key(&key, s_url, t_state.txn_conf->cache_ignore_query, t_state.txn_conf->cache_generation_number);
 
   pending_action =
-    c_sm->open_write(&key, s_url, &t_state.hdr_info.cache_request, object_read_info,
+    c_sm->open_write(&key, s_url, &t_state.hdr_info.cache_request, object_read_info, t_state.txn_conf,
                      static_cast<time_t>((t_state.cache_control.pin_in_cache_for < 0) ? 0 : t_state.cache_control.pin_in_cache_for),
                      retry, allow_multiple);
 }

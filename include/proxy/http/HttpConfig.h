@@ -625,6 +625,7 @@ struct OverridableHttpConfigParams {
   MgmtInt max_cache_open_read_retries = -1;
   MgmtInt cache_open_read_retry_time  = 10; // time in mseconds
   MgmtInt cache_generation_number     = -1;
+  MgmtInt cache_preferred_volume      = -1;
 
   // open write failure retries.
   MgmtInt max_cache_open_write_retries       = 1;
