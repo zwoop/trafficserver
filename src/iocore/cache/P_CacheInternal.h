@@ -115,6 +115,7 @@ extern int cache_config_dir_sync_max_write;
 extern int cache_config_dir_sync_parallel_tasks;
 extern int cache_config_http_max_alts;
 extern int cache_config_log_alternate_eviction;
+
 extern int cache_config_permit_pinning;
 extern int cache_config_select_alternate;
 extern int cache_config_max_doc_size;
@@ -129,6 +130,9 @@ extern int cache_config_ram_cache_compress_percent;
 extern int cache_config_ram_cache_use_seen_filter;
 extern int cache_config_hit_evacuate_percent;
 extern int cache_config_hit_evacuate_size_limit;
+
+// Stale-While-Revalidate support configuration
+extern int cache_config_reval_dir_buckets;
 extern int cache_config_force_sector_size;
 extern int cache_config_target_fragment_size;
 extern int cache_config_mutex_retry_delay;

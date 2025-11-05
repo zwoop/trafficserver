@@ -465,6 +465,12 @@ private:
   HttpTunnelProducer *setup_transfer_from_transform();
   HttpTunnelProducer *setup_cache_transfer_to_transform();
 
+  void setup_stale_while_revalidate_transfer();
+  void initiate_background_revalidation();
+  int  state_bg_revalidation_response_header(int event, void *data);
+  int  tunnel_handler_bg_cache_fill(int event, void *data);
+  void cleanup_background_revalidation(bool success);
+
   /** Configure consumers for client response transform plugins.
    *
    * @param[in] p The Tunnel's producer for whom transform plugins' consumers

@@ -2549,6 +2549,52 @@ Cache Control
 
    The maximum age in seconds allowed for a stale response before it cannot be cached.
 
+.. ts:cv:: CONFIG proxy.config.http.cache.swr.mode INT 0
+   :reloadable:
+   :overridable:
+
+   Controls the stale-while-revalidate (SWR) feature behavior. This feature allows serving
+   stale content to clients while simultaneously revalidating the content in the background.
+
+   ===== ======================================================================
+   Value Description
+   ===== ======================================================================
+   ``0`` Disabled (default). Stale-while-revalidate is not active.
+   ``1`` RFC 5861 strict mode. Honor only the ``stale-while-revalidate``
+         Cache-Control directive from origin responses.
+   ``2`` Configuration-driven mode. Use
+         :ts:cv:`proxy.config.http.cache.swr.default_value`
+         as the stale-while-revalidate window for all responses.
+   ``3`` Hybrid mode. Use RFC 5861 directive when present, otherwise fall
+         back to the configured default value.
+   ===== ======================================================================
+
+.. ts:cv:: CONFIG proxy.config.http.cache.swr.max_age INT 3600
+   :reloadable:
+   :overridable:
+   :units: seconds
+
+   The maximum allowed stale-while-revalidate window in seconds. This caps any
+   stale-while-revalidate value from Cache-Control headers or configuration to
+   prevent excessively long stale serving periods. Default is 3600 seconds (1 hour).
+
+.. ts:cv:: CONFIG proxy.config.http.cache.swr.default_value INT 0
+   :reloadable:
+   :overridable:
+   :units: seconds
+
+   The default stale-while-revalidate window in seconds to use when mode is set to
+   ``2`` (configuration-driven) or ``3`` (hybrid without Cache-Control directive).
+   A value of ``0`` (default) means no default window is applied.
+
+.. ts:cv:: CONFIG proxy.config.http.cache.swr.honor_cache_control INT 1
+   :reloadable:
+   :overridable:
+
+   When enabled (``1``, default), |TS| will respect the ``stale-while-revalidate``
+   Cache-Control directive from origin responses in modes ``1`` and ``3``. When
+   disabled (``0``), Cache-Control directives are ignored regardless of mode.
+
 .. ts:cv:: CONFIG proxy.config.http.cache.guaranteed_min_lifetime INT 0
    :reloadable:
    :overridable:

@@ -30,6 +30,8 @@
 
 #include "iocore/cache/Store.h"
 
+class RevalidationDir;
+
 #include "tscore/ink_align.h"
 #include "tscore/ink_memory.h"
 
@@ -82,6 +84,9 @@ public:
   uint32_t sector_size{};
 
   CacheVol *cache_vol{};
+
+  // Per-stripe ephemeral directory for stale-while-revalidate
+  RevalidationDir *reval_dir{nullptr};
 
   /**
    * Stripe constructor.

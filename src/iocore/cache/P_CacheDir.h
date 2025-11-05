@@ -108,8 +108,12 @@ class CacheEvacuateDocVC;
 // OpenDir
 
 #define OPEN_DIR_BUCKETS 256
-
 struct EvacuationBlock;
+struct RevalidationEntry;
+class RevalidationDir;
+
+// Configuration for RevalidationDir - set at startup only
+extern int cache_config_reval_dir_buckets;
 
 // Cache Directory
 
@@ -388,6 +392,56 @@ dir_bucket(int64_t b, Dir *seg)
 {
   return dir_in_seg(seg, b * DIR_DEPTH);
 }
+
+// Stale-While-Revalidate Support
+// IMPORTANT: This is an EPHEMERAL in-memory structure ONLY
+struct RevalidationEntry {
+  CacheKey old_cache_key; // Key of stale object being served
+  enum class State : uint8_t {
+    READING_STALE, // Serving stale, revalidation not started
+    FETCHING_NEW,  // Background fetch in progress
+    COMPLETING,    // Success - waiting for readers to finish
+    FAILED         // Revalidation failed
+  };
+
+  State state{State::READING_STALE};
+
+  std::atomic<int> active_stale_readers{0};
+  ink_hrtime       create_time{0};
+  int              num_clients_served_stale{0};
+
+  // Linking for hash bucket
+  SLINK(RevalidationEntry, link);
+};
+
+// Size is configurable via proxy.config.http.cache.stale_while_revalidate.buckets
+// Each stripe instance is proportionally sized based on stripe size
+class RevalidationDir
+{
+public:
+  RevalidationDir(int num_buckets);
+  ~RevalidationDir();
+
+  RevalidationEntry *find_entry(const CacheKey *key);
+  RevalidationEntry *find_or_create_entry(const CacheKey *old_key, const CacheKey *new_key, const Dir *old_dir, StripeSM *stripe);
+  void               remove_entry(RevalidationEntry *entry);
+  void               periodic_cleanup(ink_hrtime now);
+  int                get_active_count() const;
+  void               dump_state(const char *label) const;
+
+private:
+  SLL<RevalidationEntry> *buckets;
+  int                     num_buckets;
+  Ptr<ProxyMutex>         mutex;
+  std::atomic<int>        active_count{0};
+
+  int
+  hash_key(const CacheKey *key) const
+  {
+    uint32_t hash = key->slice32(0) ^ key->slice32(1) ^ key->slice32(2);
+    return hash % num_buckets;
+  }
+};
 
 inline Dir *
 dir_bucket_row(Dir *b, int64_t i)

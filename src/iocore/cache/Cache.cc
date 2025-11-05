@@ -83,6 +83,7 @@ int     cache_config_mutex_retry_delay             = 2;
 int     cache_read_while_writer_retry_delay        = 50;
 int     cache_config_read_while_writer_max_retries = 10;
 int     cache_config_persist_bad_disks             = false;
+int     cache_config_reval_dir_buckets             = 128;
 
 // Globals
 
@@ -889,6 +890,7 @@ ink_cache_init(ts::ModuleVersion v)
 
   RecEstablishStaticConfigInt32(cache_config_persist_bad_disks, "proxy.config.cache.persist_bad_disks");
   Dbg(dbg_ctl_cache_init, "proxy.config.cache.persist_bad_disks = %d", cache_config_persist_bad_disks);
+
   if (cache_config_persist_bad_disks) {
     std::filesystem::path localstatedir{Layout::get()->localstatedir};
     std::filesystem::path bad_disks_path{localstatedir / ts::filename::BAD_DISKS};
@@ -911,7 +913,11 @@ ink_cache_init(ts::ModuleVersion v)
             bad_disks_path.c_str());
   }
 
+  RecEstablishStaticConfigInt32(cache_config_reval_dir_buckets, "proxy.config.http.cache.stale_while_revalidate.buckets");
+  Dbg(dbg_ctl_cache_init, "proxy.config.http.cache.stale_while_revalidate.buckets = %d", cache_config_reval_dir_buckets);
+
   Result result = theCacheStore.read_config();
+
   if (result.failed()) {
     Fatal("Failed to read cache configuration %s: %s", ts::filename::STORAGE, result.message());
   }

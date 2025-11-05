@@ -64,8 +64,6 @@ DbgCtl dbg_ctl_dir_lookaside{"dir_lookaside"};
 
 ClassAllocator<OpenDirEntry, false> openDirEntryAllocator("openDirEntry");
 
-// OpenDir
-
 OpenDir::OpenDir()
 {
   SET_HANDLER(&OpenDir::signal_readers);
@@ -1154,3 +1152,252 @@ const uint8_t CacheKey_prev_table[256] = {
   209, 247, 189, 72,  69,  238, 133, 13,  167, 31,  235, 116, 201, 190, 213, 203, 104, 115, 12,  212, 52,  63,  149, 135, 183, 84,
   147, 163, 249, 65,  217, 174, 70,  6,   64,  90,  155, 177, 185, 182, 108, 121, 164, 136, 58,  220, 241, 4,
 };
+
+// RevalidationDir Implementation
+
+namespace
+{
+DbgCtl dbg_ctl_cache_reval{"cache_reval"};
+} // end anonymous namespace
+
+RevalidationDir::RevalidationDir(int num_buckets_param)
+{
+  mutex       = new_ProxyMutex();
+  num_buckets = num_buckets_param;
+  buckets     = new SLL<RevalidationEntry>[num_buckets];
+
+  active_count.store(0, std::memory_order_relaxed);
+  for (int i = 0; i < num_buckets; i++) {
+    buckets[i].head = nullptr;
+  }
+  Dbg(dbg_ctl_cache_reval, "RevalidationDir initialized with %d buckets", num_buckets);
+}
+
+RevalidationDir::~RevalidationDir()
+{
+  SCOPED_MUTEX_LOCK(lock, mutex, this_ethread());
+
+  for (int i = 0; i < num_buckets; i++) {
+    RevalidationEntry *entry = buckets[i].head;
+    while (entry) {
+      RevalidationEntry *next = entry->link.next;
+
+      if (entry->active_stale_readers.load(std::memory_order_acquire) > 0) {
+        Warning("RevalidationDir destroyed with active readers (%d) for entry",
+                entry->active_stale_readers.load(std::memory_order_acquire));
+      }
+
+      delete entry;
+      entry = next;
+    }
+    buckets[i].head = nullptr;
+  }
+
+  delete[] buckets;
+  buckets = nullptr;
+
+  Dbg(dbg_ctl_cache_reval, "RevalidationDir destroyed");
+}
+
+RevalidationEntry *
+RevalidationDir::find_entry(const CacheKey *key)
+{
+  ink_assert(mutex->thread_holding == this_ethread());
+
+  int                bucket_idx = hash_key(key);
+  RevalidationEntry *entry      = buckets[bucket_idx].head;
+
+  while (entry) {
+    if (entry->old_cache_key == *key) {
+      DDbg(dbg_ctl_cache_reval, "Found revalidation entry for key %X %X state=%d readers=%d", key->slice32(0), key->slice32(1),
+           static_cast<int>(entry->state), entry->active_stale_readers.load(std::memory_order_acquire));
+      return entry;
+    }
+    entry = entry->link.next;
+  }
+
+  DDbg(dbg_ctl_cache_reval, "No revalidation entry found for key %X %X", key->slice32(0), key->slice32(1));
+  return nullptr;
+}
+
+RevalidationEntry *
+RevalidationDir::find_or_create_entry(const CacheKey *old_key, const CacheKey *new_key, const Dir *old_dir, StripeSM *stripe)
+{
+  ink_assert(mutex->thread_holding == this_ethread());
+  ink_assert(old_key != nullptr);
+  ink_assert(new_key != nullptr);
+  ink_assert(old_dir != nullptr);
+  ink_assert(stripe != nullptr);
+
+  int                bucket_idx = hash_key(old_key);
+  RevalidationEntry *entry      = buckets[bucket_idx].head;
+
+  // Check if entry already exists (double-check pattern)
+  while (entry) {
+    if (entry->old_cache_key == *old_key) {
+      Dbg(dbg_ctl_cache_reval, "Revalidation entry already exists for key %X %X, state=%d", old_key->slice32(0),
+          old_key->slice32(1), static_cast<int>(entry->state));
+      return entry;
+    }
+    entry = entry->link.next;
+  }
+
+  // Create new entry (simplified - minimal fields)
+  entry = new RevalidationEntry();
+
+  // Initialize fields (simplified struct)
+  entry->old_cache_key = *old_key;
+  entry->state         = RevalidationEntry::State::READING_STALE;
+  entry->active_stale_readers.store(0, std::memory_order_release);
+  entry->create_time              = ink_get_hrtime();
+  entry->num_clients_served_stale = 0;
+
+  // Note: old_dir, new_key, new_dir removed in simplification
+  // (void)new_key; // Unused after simplification
+  (void)old_dir; // Unused after simplification
+  (void)stripe;  // Unused for now
+
+  // Insert at head of bucket
+  buckets[bucket_idx].push(entry);
+  active_count.fetch_add(1, std::memory_order_release);
+
+  Dbg(dbg_ctl_cache_reval, "Created new revalidation entry for key %X %X in bucket %d, total active=%d", old_key->slice32(0),
+      old_key->slice32(1), bucket_idx, active_count.load(std::memory_order_acquire));
+
+  return entry;
+}
+
+void
+RevalidationDir::remove_entry(RevalidationEntry *entry)
+{
+  ink_assert(mutex->thread_holding == this_ethread());
+  ink_assert(entry != nullptr);
+
+  // Find the bucket this entry belongs to
+  int bucket_idx = hash_key(&entry->old_cache_key);
+
+  // Verify no active readers before removal
+  int readers = entry->active_stale_readers.load(std::memory_order_acquire);
+  if (readers > 0) {
+    Warning("Removing revalidation entry with %d active readers - potential use-after-free", readers);
+  }
+
+  // Log the removal for debugging
+  Dbg(dbg_ctl_cache_reval, "Removing revalidation entry key=%X %X state=%d readers=%d served=%d", entry->old_cache_key.slice32(0),
+      entry->old_cache_key.slice32(1), static_cast<int>(entry->state), readers, entry->num_clients_served_stale);
+
+  // Remove from bucket list (manually since SLL doesn't have remove)
+  RevalidationEntry *prev = nullptr;
+  RevalidationEntry *curr = buckets[bucket_idx].head;
+  while (curr && curr != entry) {
+    prev = curr;
+    curr = curr->link.next;
+  }
+  if (curr == entry) {
+    if (prev) {
+      prev->link.next = entry->link.next;
+    } else {
+      buckets[bucket_idx].head = entry->link.next;
+    }
+  }
+  active_count.fetch_sub(1, std::memory_order_release);
+
+  // Delete the entry
+  delete entry;
+}
+
+void
+RevalidationDir::periodic_cleanup(ink_hrtime now)
+{
+  ink_assert(mutex->thread_holding == this_ethread());
+
+  static constexpr ink_hrtime MAX_ENTRY_AGE = HRTIME_HOURS(1); // Configurable in future
+  int                         cleaned       = 0;
+
+  for (int i = 0; i < num_buckets; i++) {
+    RevalidationEntry *entry = buckets[i].head;
+    while (entry) {
+      RevalidationEntry *next          = entry->link.next;
+      bool               should_remove = false;
+
+      // Check various cleanup conditions
+      ink_hrtime age = now - entry->create_time;
+
+      if (age > MAX_ENTRY_AGE) {
+        // Entry too old - probably orphaned
+        Dbg(dbg_ctl_cache_reval, "Cleaning up aged entry: key=%X %X age=%" PRId64 "ms state=%d", entry->old_cache_key.slice32(0),
+            entry->old_cache_key.slice32(1), ink_hrtime_to_msec(age), static_cast<int>(entry->state));
+        should_remove = true;
+      } else if (entry->state == RevalidationEntry::State::FAILED &&
+                 entry->active_stale_readers.load(std::memory_order_acquire) == 0) {
+        // Failed revalidation with no active readers
+        Dbg(dbg_ctl_cache_reval, "Cleaning up failed entry: key=%X %X", entry->old_cache_key.slice32(0),
+            entry->old_cache_key.slice32(1));
+        should_remove = true;
+      } else if (entry->state == RevalidationEntry::State::COMPLETING &&
+                 entry->active_stale_readers.load(std::memory_order_acquire) == 0) {
+        // Revalidation completed and no more stale readers
+        Dbg(dbg_ctl_cache_reval, "Cleaning up completed entry: key=%X %X served=%d", entry->old_cache_key.slice32(0),
+            entry->old_cache_key.slice32(1), entry->num_clients_served_stale);
+        should_remove = true;
+      }
+
+      if (should_remove) {
+        // Manual remove (SLL doesn't have remove method)
+        RevalidationEntry *prev_entry = nullptr;
+        RevalidationEntry *check      = buckets[i].head;
+        while (check && check != entry) {
+          prev_entry = check;
+          check      = check->link.next;
+        }
+        if (check == entry) {
+          if (prev_entry) {
+            prev_entry->link.next = entry->link.next;
+          } else {
+            buckets[i].head = entry->link.next;
+          }
+          active_count.fetch_sub(1, std::memory_order_release);
+          delete entry;
+          cleaned++;
+        }
+      }
+
+      entry = next;
+    }
+  }
+
+  if (cleaned > 0) {
+    Dbg(dbg_ctl_cache_reval, "Periodic cleanup removed %d entries, active count now %d", cleaned,
+        active_count.load(std::memory_order_acquire));
+  }
+}
+
+int
+RevalidationDir::get_active_count() const
+{
+  return active_count.load(std::memory_order_acquire);
+}
+
+void
+RevalidationDir::dump_state(const char *label) const
+{
+  // This is a debugging function, don't need strict mutex locking
+  int total_entries   = 0;
+  int state_counts[4] = {0}; // 4 states in simplified enum
+
+  for (int i = 0; i < num_buckets; i++) {
+    RevalidationEntry *entry = buckets[i].head;
+    while (entry) {
+      total_entries++;
+      int state_idx = static_cast<int>(entry->state);
+      if (state_idx >= 0 && state_idx < 4) {
+        state_counts[state_idx]++;
+      }
+      entry = entry->link.next;
+    }
+  }
+
+  Dbg(dbg_ctl_cache_reval, "%s: total=%d active=%d buckets=%d READING_STALE=%d FETCHING_NEW=%d COMPLETING=%d FAILED=%d",
+      label ? label : "RevalidationDir", total_entries, active_count.load(std::memory_order_acquire), num_buckets, state_counts[0],
+      state_counts[1], state_counts[2], state_counts[3]);
+}

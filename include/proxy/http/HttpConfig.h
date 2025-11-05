@@ -689,7 +689,15 @@ struct OverridableHttpConfigParams {
   MgmtInt cache_heuristic_max_lifetime  = 86400;
   MgmtInt cache_guaranteed_min_lifetime = 0;
   MgmtInt cache_guaranteed_max_lifetime = 31536000;
-  MgmtInt cache_max_stale_age           = 604800;
+
+  /////////////////////////////////////
+  // Stale-While-Revalidate Settings //
+  /////////////////////////////////////
+  MgmtInt  cache_max_stale_age     = 604800;
+  MgmtInt  swr_mode                = 0;
+  MgmtInt  swr_max_age             = 3600;
+  MgmtInt  swr_default_value       = 0;
+  MgmtByte swr_honor_cache_control = 1;
 
   ///////////////////////////////////////////////////
   // connection variables. timeouts are in seconds //

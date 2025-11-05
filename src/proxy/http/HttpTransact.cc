@@ -50,6 +50,7 @@ using namespace std::literals;
 #include "proxy/http/HttpBodyFactory.h"
 #include "proxy/IPAllow.h"
 #include "iocore/utils/Machine.h"
+#include "../../iocore/cache/P_CacheInternal.h"
 #include "ts/ats_probe.h"
 
 DbgCtl HttpTransact::State::_dbg_ctl{"http"};
@@ -2583,7 +2584,11 @@ HttpTransact::HandleCacheOpenReadHitFreshness(State *s)
       break;
     case Freshness_t::STALE:
       TxnDbg(dbg_ctl_http_seq, "Stale in cache");
-      s->cache_lookup_result = HttpTransact::CacheLookupResult_t::HIT_STALE;
+      // Don't overwrite if what_is_document_freshness() already set it to HIT_STALE_SERVE_WHILE_REVAL
+      // This happens when SWR is applicable - the document is stale but within the SWR window
+      if (s->cache_lookup_result != HttpTransact::CacheLookupResult_t::HIT_STALE_SERVE_WHILE_REVAL) {
+        s->cache_lookup_result = HttpTransact::CacheLookupResult_t::HIT_STALE;
+      }
       break;
     default:
       ink_assert(!("what_is_document_freshness has returned unsupported code."));
@@ -2597,6 +2602,14 @@ HttpTransact::HandleCacheOpenReadHitFreshness(State *s)
   if (s->serving_stale_due_to_write_lock) {
     s->cache_lookup_result = HttpTransact::CacheLookupResult_t::HIT_STALE;
   }
+
+  TxnDbg(dbg_ctl_http_trans, "[HandleCacheOpenReadHitFreshness] final cache_lookup_result=%d (%s)",
+         static_cast<int>(s->cache_lookup_result),
+         s->cache_lookup_result == CacheLookupResult_t::HIT_FRESH                   ? "HIT_FRESH" :
+         s->cache_lookup_result == CacheLookupResult_t::HIT_WARNING                 ? "HIT_WARNING" :
+         s->cache_lookup_result == CacheLookupResult_t::HIT_STALE                   ? "HIT_STALE" :
+         s->cache_lookup_result == CacheLookupResult_t::HIT_STALE_SERVE_WHILE_REVAL ? "HIT_STALE_SERVE_WHILE_REVAL" :
+                                                                                     "UNKNOWN");
 
   ink_assert(s->cache_lookup_result != HttpTransact::CacheLookupResult_t::MISS);
   if (s->cache_lookup_result == HttpTransact::CacheLookupResult_t::HIT_STALE) {
@@ -2789,6 +2802,36 @@ HttpTransact::HandleCacheOpenReadHit(State *s)
 
   ink_assert(is_cache_hit(s->cache_lookup_result));
 
+  // Check for stale-while-revalidate special case first
+  if (s->cache_lookup_result == CacheLookupResult_t::HIT_STALE_SERVE_WHILE_REVAL) {
+    // Document is stale but within stale-while-revalidate window
+    // We'll serve the stale content immediately AND trigger background revalidation
+    TxnDbg(dbg_ctl_http_trans, "CacheOpenRead --- HIT-STALE-WHILE-REVALIDATE");
+    TxnDbg(dbg_ctl_http_trans, "Will serve stale and revalidate in background");
+
+    // Initialize the stale-while-revalidate operation in HttpCacheSM
+    // This sets up the RevalidationEntry and prepares for dual operation
+    HttpCacheSM &cache_sm = s->state_machine->get_cache_sm();
+
+    // Get the cache key for this object
+    HttpCacheKey old_key;
+    Cache::generate_key(&old_key, s->cache_info.lookup_url, s->txn_conf->cache_ignore_query, s->txn_conf->cache_generation_number);
+
+    // Initialize stale-while-revalidate tracking
+    if (cache_sm.init_stale_while_revalidate(&old_key, &old_key)) {
+      TxnDbg(dbg_ctl_http_trans, "Successfully initialized stale-while-revalidate");
+
+      needs_revalidate = true; // Will trigger background revalidation
+      SET_VIA_STRING(VIA_DETAIL_CACHE_LOOKUP, VIA_DETAIL_MISS_EXPIRED);
+      // Note: We'll still serve the stale content below, but revalidation happens in parallel
+    } else {
+      TxnDbg(dbg_ctl_http_trans, "Failed to initialize stale-while-revalidate, falling back to normal revalidate");
+      // Fall back to normal revalidation
+      s->cache_lookup_result = CacheLookupResult_t::HIT_STALE;
+      needs_revalidate       = true;
+      SET_VIA_STRING(VIA_DETAIL_CACHE_LOOKUP, VIA_DETAIL_MISS_EXPIRED);
+    }
+  }
   // We'll request a revalidation under one of these conditions:
   //
   // 1. Cache lookup is a hit, but the response is stale
@@ -2839,7 +2882,19 @@ HttpTransact::HandleCacheOpenReadHit(State *s)
   TxnDbg(dbg_ctl_http_trans, "CacheOpenRead --- needs_cache_auth    = %d", needs_cache_auth);
   TxnDbg(dbg_ctl_http_trans, "CacheOpenRead --- send_revalidate     = %d", send_revalidate);
 
-  if (send_revalidate) {
+  // Special handling for stale-while-revalidate
+  if (s->cache_lookup_result == CacheLookupResult_t::HIT_STALE_SERVE_WHILE_REVAL) {
+    TxnDbg(dbg_ctl_http_trans, "CacheOpenRead --- STALE-WHILE-REVALIDATE");
+    TxnDbg(dbg_ctl_http_trans, "Serving stale content immediately, background revalidation will be triggered");
+
+    // Serve the stale content immediately (skip to serve_from_cache logic below)
+    // The background revalidation will be initiated by HttpSM
+    send_revalidate = false; // Don't block on revalidation
+    server_up       = true;  // Pretend server connection isn't needed for immediate response
+
+    // Note: HttpSM will detect HIT_STALE_SERVE_WHILE_REVAL and initiate
+    // background revalidation after starting to serve the stale content
+  } else if (send_revalidate) {
     TxnDbg(dbg_ctl_http_trans, "CacheOpenRead --- HIT-STALE");
 
     TxnDbg(dbg_ctl_http_seq, "Revalidate document with server");
@@ -3143,6 +3198,10 @@ HttpTransact::handle_cache_write_lock(State *s)
   ink_assert(s->cache_info.action == CacheAction_t::PREPARE_TO_DELETE || s->cache_info.action == CacheAction_t::PREPARE_TO_UPDATE ||
              s->cache_info.action == CacheAction_t::PREPARE_TO_WRITE);
 
+  // FIX: Increment total retry counter to prevent infinite loops
+  HttpCacheSM &cache_sm = s->state_machine->get_cache_sm();
+  cache_sm.total_retry_attempts++;
+
   switch (s->cache_info.write_lock_state) {
   case CacheWriteLock_t::SUCCESS:
     // We were able to get the lock for the URL vector in the cache
@@ -3184,9 +3243,27 @@ HttpTransact::handle_cache_write_lock(State *s)
     }
     break;
   case CacheWriteLock_t::READ_RETRY:
+    // FIX: Enhanced READ_RETRY handling with safety checks
+    TxnDbg(dbg_ctl_http_trans, "Handling READ_RETRY after write failure");
+
+    // SAFETY CHECK #1: Prevent infinite loops
+    if (cache_sm.total_retry_attempts > HttpCacheSM::MAX_TOTAL_RETRIES) {
+      Warning("[%" PRId64 "] READ_RETRY exceeded max attempts (%d), falling back to proxy-only", s->state_machine->sm_id,
+              cache_sm.total_retry_attempts);
+
+      s->cache_info.action           = CacheAction_t::NO_ACTION;
+      s->cache_info.write_lock_state = CacheWriteLock_t::FAIL;
+      s->cache_info.write_status     = CacheWriteStatus_t::ERROR;
+
+      StateMachineAction_t next = how_to_open_connection(s);
+      s->next_action            = next;
+      return;
+    }
+
     s->request_sent_time      = UNDEFINED_TIME;
     s->response_received_time = UNDEFINED_TIME;
     s->cache_info.action      = CacheAction_t::LOOKUP;
+
     if (!s->cache_info.object_read) {
       //  Write failed and read retry triggered
       //  Clean up server_request and re-initiate
@@ -3195,15 +3272,45 @@ HttpTransact::handle_cache_write_lock(State *s)
                  s->cache_open_write_fail_action ==
                    static_cast<MgmtByte>(CacheOpenWriteFailAction_t::READ_RETRY_STALE_ON_REVALIDATE));
       s->cache_info.write_status = CacheWriteStatus_t::LOCK_MISS;
-      StateMachineAction_t next;
-      next           = StateMachineAction_t::CACHE_LOOKUP;
-      s->next_action = next;
-      s->hdr_info.server_request.destroy();
+
+      // SAFETY CHECK #2: Only destroy server_request if safe
+      if (s->hdr_info.server_request.valid()) {
+        bool server_active = (s->current.state == CONNECTION_ALIVE || s->current.state == TRANSACTION_COMPLETE ||
+                              s->current.server != nullptr || s->state_machine->server_entry != nullptr);
+
+        if (!server_active) {
+          TxnDbg(dbg_ctl_http_trans, "READ_RETRY: destroying server_request (no active connection)");
+          s->hdr_info.server_request.destroy();
+        } else {
+          TxnDbg(dbg_ctl_http_trans, "READ_RETRY: server active, clearing conditionals only");
+          s->hdr_info.server_request.field_delete(static_cast<std::string_view>(MIME_FIELD_IF_MODIFIED_SINCE));
+          s->hdr_info.server_request.field_delete(static_cast<std::string_view>(MIME_FIELD_IF_NONE_MATCH));
+        }
+      }
+
+      StateMachineAction_t next = StateMachineAction_t::CACHE_LOOKUP;
+      s->next_action            = next;
       TRANSACT_RETURN(next, nullptr);
     }
-    //  Write failed but retried and got a vector to read
-    //  We need to clean up our state so that transact does
-    //  not assert later on.  Then handle the open read hit
+
+    // Write failed but read retry found cached object
+    // SAFETY CHECK #3: Validate object before using
+    if (!s->cache_info.object_read->valid()) {
+      Warning("[%" PRId64 "] READ_RETRY found invalid cached object", s->state_machine->sm_id);
+
+      s->cache_info.object_read = nullptr;
+      s->cache_lookup_result    = CacheLookupResult_t::MISS;
+
+      // Retry cache lookup
+      StateMachineAction_t next = StateMachineAction_t::CACHE_LOOKUP;
+      s->next_action            = next;
+      TRANSACT_RETURN(next, nullptr);
+    }
+
+    // FIX: Set correct cache_lookup_result based on freshness
+    // The old code incorrectly left it as NONE
+    TxnDbg(dbg_ctl_http_trans, "READ_RETRY found cached object, determining freshness");
+
     remove_ims = true;
     SET_VIA_STRING(VIA_DETAIL_CACHE_TYPE, VIA_DETAIL_CACHE);
     break;
@@ -3281,8 +3388,6 @@ HttpTransact::handle_cache_write_lock(State *s)
         s->hdr_info.server_request.destroy();
         TRANSACT_RETURN(StateMachineAction_t::CACHE_LOOKUP, nullptr);
       }
-    } else {
-      HandleCacheOpenReadMiss(s);
     }
   } else {
     handle_cache_write_lock_go_to_origin(s);
@@ -7330,6 +7435,147 @@ HttpTransact::get_max_age(HTTPHdr *response)
   return max_age;
 }
 
+///////////////////////////////////////////////////////////////////////////////
+// Name       : get_stale_while_revalidate_value
+// Details    : Implements RFC 5861 parsing with config-driven fallbacks
+//              Mode 0: Disabled (return -1)
+//              Mode 1: RFC 5861 strict (only from Cache-Control header)
+//              Mode 2: Config-driven (ignore RFC headers, use default_value)
+//              Mode 3: Hybrid (prefer RFC header, fallback to config)
+///////////////////////////////////////////////////////////////////////////////
+int
+HttpTransact::get_stale_while_revalidate_value(HTTPHdr *response, const OverridableHttpConfigParams *config)
+{
+  int mode = config->swr_mode;
+
+  Dbg(dbg_ctl_http_trans, "[get_stale_while_revalidate_value] mode=%d, swr_honor_cache_control=%lld, default_value=%lld, max_age=%lld",
+      mode, static_cast<long long>(config->swr_honor_cache_control), static_cast<long long>(config->swr_default_value),
+      static_cast<long long>(config->swr_max_age));
+
+  // Mode 0: Disabled
+  if (mode == 0) {
+    Dbg(dbg_ctl_http_trans, "[get_stale_while_revalidate_value] mode=0 (disabled), returning -1");
+    return -1;
+  }
+
+  int swr_value = -1;
+
+  // Mode 1 or 3: Check for RFC 5861 Cache-Control: stale-while-revalidate directive
+  if ((mode == 1 || mode == 3) && config->swr_honor_cache_control) {
+    Dbg(dbg_ctl_http_trans, "[get_stale_while_revalidate_value] mode=%d, checking RFC header...", mode);
+    if (response->presence(MIME_PRESENCE_CACHE_CONTROL)) {
+      MIMEField *cc_field = response->field_find(static_cast<std::string_view>(MIME_FIELD_CACHE_CONTROL));
+
+      if (cc_field) {
+        HdrCsvIter  csv_iter;
+        int         directive_len;
+        const char *directive = csv_iter.get_first(cc_field, &directive_len);
+
+        while (directive) {
+          const char *equals = static_cast<const char *>(memchr(directive, '=', directive_len));
+
+          if (equals) {
+            int name_len = equals - directive;
+
+            if (name_len == 22 && strncasecmp(directive, "stale-while-revalidate", 22) == 0) {
+              const char *value_start = equals + 1;
+              int         value_len   = directive_len - name_len - 1;
+
+              if (value_len > 0) {
+                swr_value = ink_atoi(value_start, value_len);
+                Dbg(dbg_ctl_http_trans, "[get_stale_while_revalidate_value] RFC header found, swr_value=%d", swr_value);
+                break;
+              }
+            }
+          }
+          directive = csv_iter.get_next(&directive_len);
+        }
+      }
+    }
+    if (swr_value < 0) {
+      Dbg(dbg_ctl_http_trans, "[get_stale_while_revalidate_value] RFC header not found");
+    }
+  }
+
+  // Mode 2: Always use config default
+  // Mode 3: Use config default if RFC header not found
+  if (mode == 2 || (mode == 3 && swr_value < 0)) {
+    Dbg(dbg_ctl_http_trans, "[get_stale_while_revalidate_value] using default_value=%lld", static_cast<long long>(config->swr_default_value));
+    swr_value = config->swr_default_value;
+  }
+
+  // Apply max_age limit
+  if (swr_value > 0) {
+    int original_swr = swr_value;
+    swr_value        = std::min(swr_value, static_cast<int>(config->swr_max_age));
+    if (original_swr != swr_value) {
+      Dbg(dbg_ctl_http_trans, "[get_stale_while_revalidate_value] capped swr_value from %d to %d (max_age limit)", original_swr,
+          swr_value);
+    }
+  }
+
+  Dbg(dbg_ctl_http_trans, "[get_stale_while_revalidate_value] returning swr_value=%d", swr_value);
+  return swr_value;
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Name       : is_stale_while_revalidate_applicable
+// Details    : Returns true if:
+//              1. Stale-while-revalidate is enabled
+//              2. Document is stale (current_age > fresh_limit)
+//              3. Document is within stale-while-revalidate window
+//              4. No must-revalidate or proxy-revalidate directives
+///////////////////////////////////////////////////////////////////////////////
+bool
+HttpTransact::is_stale_while_revalidate_applicable(State *s, HTTPHdr *cached_response, ink_time_t current_age, int fresh_limit)
+{
+  TxnDbg(dbg_ctl_http_trans,
+         "[is_stale_while_revalidate_applicable] checking SWR applicability: current_age=%" PRId64 ", fresh_limit=%d",
+         (int64_t)current_age, fresh_limit);
+
+  int swr_value = get_stale_while_revalidate_value(cached_response, s->txn_conf);
+
+  TxnDbg(dbg_ctl_http_trans, "[is_stale_while_revalidate_applicable] swr_value=%d", swr_value);
+
+  if (swr_value <= 0) {
+    TxnDbg(dbg_ctl_http_trans, "[is_stale_while_revalidate_applicable] swr_value <= 0, returning false (disabled)");
+    return false;
+  }
+
+  if (current_age <= fresh_limit) {
+    TxnDbg(dbg_ctl_http_trans,
+           "[is_stale_while_revalidate_applicable] document not stale (current_age <= fresh_limit), returning false");
+    return false;
+  }
+  int staleness = current_age - fresh_limit;
+
+  TxnDbg(dbg_ctl_http_trans, "[is_stale_while_revalidate_applicable] staleness=%d, checking if within SWR window...", staleness);
+
+  // Check if we're within the stale-while-revalidate window
+  if (staleness > swr_value) {
+    TxnDbg(dbg_ctl_http_match, "Document staleness (%d) exceeds stale-while-revalidate window (%d)", staleness, swr_value);
+    TxnDbg(dbg_ctl_http_trans, "[is_stale_while_revalidate_applicable] staleness (%d) > swr_window (%d), returning false",
+           staleness, swr_value);
+    return false;
+  }
+
+  uint32_t cc_mask = cached_response->get_cooked_cc_mask();
+
+  if (cc_mask & (MIME_COOKED_MASK_CC_MUST_REVALIDATE | MIME_COOKED_MASK_CC_PROXY_REVALIDATE)) {
+    TxnDbg(dbg_ctl_http_match, "must-revalidate or proxy-revalidate present, cannot use stale-while-revalidate");
+    TxnDbg(dbg_ctl_http_trans,
+           "[is_stale_while_revalidate_applicable] must-revalidate or proxy-revalidate present, returning false");
+    return false;
+  }
+
+  TxnDbg(dbg_ctl_http_match,
+         "Stale-while-revalidate applicable: staleness=%d, swr_window=%d, current_age=%" PRId64 ", fresh_limit=%d", staleness,
+         swr_value, (int64_t)current_age, fresh_limit);
+  TxnDbg(dbg_ctl_http_trans, "[is_stale_while_revalidate_applicable] PASS: within SWR window, returning true");
+
+  return true;
+}
+
 int
 HttpTransact::calculate_document_freshness_limit(State *s, HTTPHdr *response, time_t response_date, bool *heuristic)
 {
@@ -7631,9 +7877,30 @@ HttpTransact::what_is_document_freshness(State *s, HTTPHdr *client_request, HTTP
   // now, see if the age is "fresh enough" //
   ///////////////////////////////////////////
 
+  TxnDbg(dbg_ctl_http_trans, "[what_is_document_freshness] do_revalidate=%d, age_limit=%d, current_age=%" PRId64 ", fresh_limit=%d",
+         do_revalidate, age_limit, (int64_t)current_age, fresh_limit);
+
   if (do_revalidate || !age_limit || current_age > age_limit) { // client-modified limit
+    TxnDbg(dbg_ctl_http_trans, "[what_is_document_freshness] document appears stale, checking if SWR applicable...");
+
+    // Check if stale-while-revalidate applies before declaring document stale
+    if (!do_revalidate && is_stale_while_revalidate_applicable(s, cached_obj_response, current_age, fresh_limit)) {
+      TxnDbg(dbg_ctl_http_match, "Document stale but within stale-while-revalidate window; "
+                                 "can serve stale while revalidating in background");
+      TxnDbg(dbg_ctl_http_trans,
+             "[what_is_document_freshness] SWR applicable, setting cache_lookup_result=HIT_STALE_SERVE_WHILE_REVAL");
+      // Mark for special handling - serve stale + background revalidate
+      s->cache_lookup_result = CacheLookupResult_t::HIT_STALE_SERVE_WHILE_REVAL;
+      return (Freshness_t::STALE); // Still stale, but will be handled specially
+    } else if (do_revalidate) {
+      TxnDbg(dbg_ctl_http_trans, "[what_is_document_freshness] do_revalidate=1, skipping SWR check");
+    } else {
+      TxnDbg(dbg_ctl_http_trans, "[what_is_document_freshness] SWR not applicable");
+    }
+
     TxnDbg(dbg_ctl_http_match, "document needs revalidate/too old; "
                                "returning Freshness_t::STALE");
+    TxnDbg(dbg_ctl_http_trans, "[what_is_document_freshness] returning Freshness_t::STALE");
     return (Freshness_t::STALE);
   } else if (current_age > fresh_limit) { // original limit
     if (os_specifies_revalidate) {
@@ -7860,7 +8127,7 @@ HttpTransact::is_fresh_cache_hit(CacheLookupResult_t r)
 bool
 HttpTransact::is_cache_hit(CacheLookupResult_t r)
 {
-  return (is_fresh_cache_hit(r) || r == CacheLookupResult_t::HIT_STALE);
+  return (is_fresh_cache_hit(r) || r == CacheLookupResult_t::HIT_STALE || r == CacheLookupResult_t::HIT_STALE_SERVE_WHILE_REVAL);
 }
 
 void

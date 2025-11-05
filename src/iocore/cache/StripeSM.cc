@@ -169,6 +169,15 @@ StripeSM::init(bool clear)
 {
   CryptoContext().hash_immediate(hash_id, hash_text, strlen(hash_text));
 
+  // Initialize per-stripe ephemeral revalidation directory
+  // Calculate per-stripe bucket count (proportional to stripe size vs total)
+  int stripe_buckets = cache_config_reval_dir_buckets;
+  if (gnstripes > 0) {
+    stripe_buckets = std::max(16, cache_config_reval_dir_buckets / std::max(1, static_cast<int>(gnstripes)));
+  }
+  reval_dir = new RevalidationDir(stripe_buckets);
+  Dbg(dbg_ctl_cache_init, "Stripe %s: RevalidationDir initialized with %d buckets", hash_text.get(), stripe_buckets);
+
   // Evacuation
   this->recompute_hit_evacuate_window();
 

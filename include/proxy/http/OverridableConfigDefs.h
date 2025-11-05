@@ -250,6 +250,10 @@
   X(HTTP_CONNECT_ATTEMPTS_RETRY_BACKOFF_BASE,       connect_attempts_retry_backoff_base,        "proxy.config.http.connect_attempts_retry_backoff_base",          INT,    GENERIC) \
   X(HTTP_NEGATIVE_REVALIDATING_LIST,                negative_revalidating_list,                 "proxy.config.http.negative_revalidating_list",                   STRING, HttpStatusCodeList_Conv) \
   X(HTTP_CACHE_POST_METHOD,                         cache_post_method,                          "proxy.config.http.cache.post_method",                            INT,    GENERIC) \
-  X(HTTP_CACHE_TARGETED_CACHE_CONTROL_HEADERS,      targeted_cache_control_headers,             "proxy.config.http.cache.targeted_cache_control_headers",         STRING, TargetedCacheControlHeaders_Conv)
+  X(HTTP_CACHE_TARGETED_CACHE_CONTROL_HEADERS,      targeted_cache_control_headers,             "proxy.config.http.cache.targeted_cache_control_headers",         STRING, TargetedCacheControlHeaders_Conv) \
+  X(HTTP_CACHE_SWR_MODE,                            swr_mode,                                   "proxy.config.http.cache.swr.mode",                               INT,    GENERIC) \
+  X(HTTP_CACHE_SWR_MAX_AGE,                         swr_max_age,                                "proxy.config.http.cache.swr.max_age",                            INT,    GENERIC) \
+  X(HTTP_CACHE_SWR_DEFAULT_VALUE,                   swr_default_value,                          "proxy.config.http.cache.swr.default_value",                      INT,    GENERIC) \
+  X(HTTP_CACHE_SWR_HONOR_CACHE_CONTROL,             swr_honor_cache_control,                    "proxy.config.http.cache.swr.honor_cache_control",                INT,    GENERIC)
 
 // clang-format on

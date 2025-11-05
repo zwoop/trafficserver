@@ -3110,12 +3110,35 @@ HttpSM::tunnel_handler(int event, void * /* data ATS_UNUSED */)
 
   // If we had already received EOS, just go away. We would sometimes see
   // a WRITE event appear after receiving EOS from the server connection
-  if ((event == VC_EVENT_WRITE_READY || event == VC_EVENT_WRITE_COMPLETE) && server_entry->eos) {
+  if ((event == VC_EVENT_WRITE_READY || event == VC_EVENT_WRITE_COMPLETE) && server_entry && server_entry->eos) {
     return 0;
   }
 
   ink_assert(event == HTTP_TUNNEL_EVENT_DONE || event == VC_EVENT_INACTIVITY_TIMEOUT);
-  // The tunnel calls this when it is done
+
+  // Check if we need to do background revalidation after serving stale
+  if (cache_sm.doing_stale_while_reval && event == HTTP_TUNNEL_EVENT_DONE) {
+    // Check if another transaction is already handling the background fetch
+    if (cache_sm.reval_entry && cache_sm.reval_entry->state == RevalidationEntry::State::FETCHING_NEW) {
+      // Another transaction is already doing the fetch - we just served stale
+      // Clean up and terminate normally
+      SMDbg(dbg_ctl_http, "Another transaction is handling background revalidation, terminating");
+      cache_sm.end_stale_while_reval();
+      terminate_sm = true;
+      return 0;
+    }
+
+    SMDbg(dbg_ctl_http, "Client tunnel done, initiating background revalidation");
+
+    // Don't terminate yet - we need to do background revalidation
+    terminate_sm = false;
+
+    // Initiate background revalidation
+    initiate_background_revalidation();
+    return 0;
+  }
+
+  // Normal case: The tunnel calls this when it is done
   terminate_sm = true;
 
   if (unlikely(t_state.is_websocket)) {
@@ -3786,6 +3809,11 @@ HttpSM::tunnel_handler_cache_read(int event, HttpTunnelProducer *p)
       p->read_vio = nullptr;
       tunnel.chain_abort_all(p);
       Metrics::Counter::increment(http_rsb.cache_read_errors);
+
+      // If doing stale-while-revalidate, cancel background revalidation
+      if (cache_sm.doing_stale_while_reval) {
+        cleanup_background_revalidation(false);
+      }
       break;
     } else {
       tunnel.local_finish_all(p);
@@ -7506,6 +7534,403 @@ HttpSM::setup_blind_tunnel(bool send_response_hdr, IOBufferReader *initial)
   }
 }
 
+//////////////////////////////////////////////////////////////////////////
+//
+//  HttpSM::setup_stale_while_revalidate_transfer()
+//
+//  Sets up dual operation for stale-while-revalidate (RFC 5861):
+//  1. Serve stale content to client immediately (fast path)
+//  2. Revalidate with origin server in background (async)
+//  3. Cache new content when available (no client involvement)
+//
+//  Uses Option 1: Continue serving stale, cache new in background
+//  This is simpler and safer than mid-stream tunnel switching
+//
+//////////////////////////////////////////////////////////////////////////
+void
+HttpSM::setup_stale_while_revalidate_transfer()
+{
+  SMDbg(dbg_ctl_http, "Setting up stale-while-revalidate: serving stale + background revalidation");
+
+  ink_assert(cache_sm.cache_read_vc != nullptr);
+  ink_assert(t_state.cache_lookup_result == HttpTransact::CacheLookupResult_t::HIT_STALE_SERVE_WHILE_REVAL);
+
+  // Mark that we're doing stale-while-revalidate
+  cache_sm.doing_stale_while_reval = true;
+
+  // Set source for logging/stats
+  t_state.source = HttpTransact::Source_t::CACHE;
+
+  // Step 1: Serve stale content to client (immediate, fast path)
+  // Use existing cache serve logic - this is the primary response path
+  if (transform_info.vc) {
+    ink_assert(t_state.hdr_info.client_response.valid() == 0);
+    ink_assert((t_state.hdr_info.transform_response.valid() ? true : false) == true);
+    do_drain_request_body(t_state.hdr_info.transform_response);
+    t_state.hdr_info.cache_response.create(HTTPType::RESPONSE);
+    t_state.hdr_info.cache_response.copy(&t_state.hdr_info.transform_response);
+
+    HttpTunnelProducer *p = setup_cache_transfer_to_transform();
+    // Don't do cache write action here - that's for the background operation
+    tunnel.tunnel_run(p);
+  } else {
+    ink_assert((t_state.hdr_info.client_response.valid() ? true : false) == true);
+    do_drain_request_body(t_state.hdr_info.client_response);
+    t_state.hdr_info.cache_response.create(HTTPType::RESPONSE);
+    t_state.hdr_info.cache_response.copy(&t_state.hdr_info.client_response);
+
+    t_state.api_next_action = HttpTransact::StateMachineAction_t::API_SEND_RESPONSE_HDR;
+
+    // check to see if there is a plugin hook set
+    if (hooks_set) {
+      do_api_callout_internal();
+    } else {
+      handle_api_return();
+    }
+  }
+
+  // Step 2: Initiate background revalidation (async, parallel)
+  // This happens after the client response is set up
+  // The actual origin server connection will be opened when handle_api_return()
+  // processes the response, and we'll hook in there to start background fill
+
+  // Note: The background revalidation will be initiated in the tunnel_handler
+  // after the client response headers are sent. This keeps the fast path
+  // (serving stale to client) separate from the slow path (origin revalidation).
+}
+
+//////////////////////////////////////////////////////////////////////////
+//
+//  HttpSM::initiate_background_revalidation()
+//
+//  Called after client response headers are sent to start the background
+//  revalidation with the origin server. Opens a connection and issues
+//  a conditional request (If-Modified-Since / If-None-Match).
+//
+//////////////////////////////////////////////////////////////////////////
+void
+HttpSM::initiate_background_revalidation()
+{
+  SMDbg(dbg_ctl_http, "Initiating background revalidation for stale content");
+
+  ink_assert(cache_sm.doing_stale_while_reval);
+  ink_assert(server_entry == nullptr); // Should not have server connection yet
+
+  // Set up to connect to origin server for revalidation
+  // We'll use the existing server connection logic
+  t_state.next_action = HttpTransact::StateMachineAction_t::ORIGIN_SERVER_OPEN;
+
+  // Set the handler for background revalidation response
+  HTTP_SM_SET_DEFAULT_HANDLER(&HttpSM::state_bg_revalidation_response_header);
+
+  // Trigger the origin server connection
+  // This will call state_http_server_open when connection completes
+  do_http_server_open();
+}
+
+//////////////////////////////////////////////////////////////////////////
+//
+//  HttpSM::state_bg_revalidation_response_header()
+//
+//  Handles the origin server response during background revalidation.
+//  - 304 Not Modified: Just update cache headers, content stays same
+//  - 200 OK: Cache the new content via background fill
+//  - Error: Log and mark revalidation as failed
+//
+//////////////////////////////////////////////////////////////////////////
+int
+HttpSM::state_bg_revalidation_response_header(int event, void *data)
+{
+  STATE_ENTER(&HttpSM::state_bg_revalidation_response_header, event);
+
+  ink_assert(cache_sm.doing_stale_while_reval);
+  ink_assert(server_entry->read_vio == (VIO *)data);
+
+  int bytes_used = 0;
+
+  switch (event) {
+  case VC_EVENT_EOS:
+    server_entry->eos = true;
+    break;
+
+  case VC_EVENT_READ_READY:
+  case VC_EVENT_READ_COMPLETE:
+    // More data to parse
+    break;
+
+  case VC_EVENT_ERROR:
+  case VC_EVENT_INACTIVITY_TIMEOUT:
+  case VC_EVENT_ACTIVE_TIMEOUT:
+    // Background revalidation failed - log and cleanup
+    SMDbg(dbg_ctl_http, "Background revalidation failed: %s", HttpDebugNames::get_event_name(event));
+    cleanup_background_revalidation(false);
+
+    // Don't affect the client - they already got stale content
+    // Just cleanup and finish the SM
+    terminate_sm = true;
+    return 0;
+  }
+
+  // Parse the response header
+  ParseResult state =
+    t_state.hdr_info.server_response.parse_resp(&http_parser, server_txn->get_remote_reader(), &bytes_used, server_entry->eos);
+
+  server_response_hdr_bytes += bytes_used;
+
+  // Check for errors or completion
+  if (state == ParseResult::CONT && !server_entry->eos) {
+    server_entry->read_vio->reenable();
+    return VC_EVENT_CONT;
+  }
+
+  // Disable further IO for now
+  server_entry->read_vio->nbytes = server_entry->read_vio->ndone;
+  http_parser_clear(&http_parser);
+
+  if (state == ParseResult::ERROR) {
+    SMDbg(dbg_ctl_http, "Background revalidation: error parsing response");
+    cleanup_background_revalidation(false);
+    terminate_sm = true;
+    return 0;
+  }
+
+  // Check the response code
+  HTTPStatus status = t_state.hdr_info.server_response.status_get();
+
+  if (status == HTTPStatus::NOT_MODIFIED) {
+    // 304 Not Modified - merge headers and update cache
+    SMDbg(dbg_ctl_http, "Background revalidation: 304 Not Modified - merging headers and updating cache");
+
+    // Close stale read VC if still open
+    cache_sm.close_stale_read();
+
+    // Get the cached object that we served to the client
+    if (!t_state.cache_info.object_read || !t_state.cache_info.object_read->valid()) {
+      SMDbg(dbg_ctl_http, "Background revalidation: no valid cached object to update");
+      cleanup_background_revalidation(false);
+      terminate_sm = true;
+      return 0;
+    }
+
+    // Create new object store for the updated headers
+    t_state.cache_info.object_store.create();
+
+    // Copy the request from the cached object
+    t_state.cache_info.object_store.request_set(t_state.cache_info.object_read->request_get());
+
+    // Start with the cached response
+    t_state.cache_info.object_store.response_set(t_state.cache_info.object_read->response_get());
+
+    // Get the response to merge into
+    HTTPHdr *merged_response = t_state.cache_info.object_store.response_get();
+
+    // Merge 304 response headers into the cached response
+    // This updates Date, Cache-Control, Expires, ETag, etc.
+    HttpTransact::merge_response_header_with_cached_header(merged_response, &t_state.hdr_info.server_response);
+
+    // Update timestamps for the freshened object
+    if (t_state.request_sent_time == 0) {
+      t_state.request_sent_time = ink_get_hrtime();
+    }
+    if (t_state.response_received_time == 0) {
+      t_state.response_received_time = ink_get_hrtime();
+    }
+
+    t_state.cache_info.object_store.request_sent_time_set(t_state.request_sent_time);
+    t_state.cache_info.object_store.response_received_time_set(t_state.response_received_time);
+
+    // Special handling for 304: update timestamps
+    // The 304 response should freshen the document
+    time_t date_value = t_state.hdr_info.server_response.get_date();
+    if (date_value > 0) {
+      merged_response->set_date(date_value);
+    }
+
+    // Open cache for UPDATE to commit the freshened headers
+    HttpCacheKey key;
+    Cache::generate_key(&key, t_state.cache_info.lookup_url, t_state.txn_conf->cache_ignore_query,
+                        t_state.txn_conf->cache_generation_number);
+
+    // Open write to update the cached entry with new headers
+    Action *cache_action = cache_sm.open_write(
+      &key, t_state.cache_info.lookup_url, &t_state.hdr_info.server_request, t_state.cache_info.object_read,
+      static_cast<time_t>((t_state.cache_control.pin_in_cache_for < 0) ? 0 : t_state.cache_control.pin_in_cache_for), false, false);
+
+    // Check if cache open completed synchronously
+    if (cache_action != ACTION_RESULT_DONE || !cache_sm.cache_write_vc) {
+      SMDbg(dbg_ctl_http, "Background 304 cache update open failed or async - continuing without update");
+      cleanup_background_revalidation(false);
+      terminate_sm = true;
+      return 0;
+    }
+
+    // Set the updated headers in the cache write VC
+    cache_sm.cache_write_vc->set_http_info(&t_state.cache_info.object_store);
+
+    // For 304, we only update headers - no body to write
+    // Just close the write which commits the header update
+    cache_sm.close_write();
+
+    SMDbg(dbg_ctl_http, "Background revalidation: 304 headers merged and cache updated successfully");
+
+    cleanup_background_revalidation(true);
+    terminate_sm = true;
+
+  } else if (status == HTTPStatus::OK) {
+    // 200 OK - cache the new content via background fill
+    SMDbg(dbg_ctl_http, "Background revalidation: 200 OK - caching new content");
+
+    // Close stale read VC if still open
+    cache_sm.close_stale_read();
+
+    // Prepare cache info for new object
+    t_state.cache_info.object_store.create();
+    t_state.cache_info.object_store.request_set(&t_state.hdr_info.server_request);
+    t_state.cache_info.object_store.response_set(&t_state.hdr_info.server_response);
+
+    // Need to set sent/received times for cache
+    if (t_state.request_sent_time == 0) {
+      t_state.request_sent_time = ink_get_hrtime();
+    }
+    if (t_state.response_received_time == 0) {
+      t_state.response_received_time = ink_get_hrtime();
+    }
+
+    t_state.cache_info.object_store.request_sent_time_set(t_state.request_sent_time);
+    t_state.cache_info.object_store.response_received_time_set(t_state.response_received_time);
+
+    // Open cache for write (will overwrite stale entry)
+    HttpCacheKey key;
+    Cache::generate_key(&key, t_state.cache_info.lookup_url, t_state.txn_conf->cache_ignore_query,
+                        t_state.txn_conf->cache_generation_number);
+
+    // Open write passing old object to overwrite stale entry
+    Action *cache_action = cache_sm.open_write(
+      &key, t_state.cache_info.lookup_url, &t_state.hdr_info.server_request, t_state.cache_info.object_read,
+      static_cast<time_t>((t_state.cache_control.pin_in_cache_for < 0) ? 0 : t_state.cache_control.pin_in_cache_for), false, false);
+
+    // If cache open didn't complete synchronously, we need to wait
+    // For now, assume synchronous success and proceed
+    // TODO: Handle async cache open properly
+    if (cache_action != ACTION_RESULT_DONE || !cache_sm.cache_write_vc) {
+      SMDbg(dbg_ctl_http, "Background cache write open failed or async - continuing without cache");
+      cleanup_background_revalidation(false);
+      terminate_sm = true;
+      return 0;
+    }
+
+    // Set up tunnel for: origin → cache (background fill, no client)
+    HTTP_SM_SET_DEFAULT_HANDLER(&HttpSM::tunnel_handler_bg_cache_fill);
+
+    // Create buffer for cache write
+    int64_t         alloc_index = find_server_buffer_size();
+    MIOBuffer      *buf         = new_MIOBuffer(alloc_index);
+    IOBufferReader *buf_start   = buf->alloc_reader();
+
+    // Copy any pre-read data
+    int64_t nbytes = server_transfer_init(buf, 0);
+
+    // Set up producer: origin server
+    HttpTunnelProducer *p = tunnel.add_producer(server_entry->vc, nbytes, buf_start, &HttpSM::tunnel_handler_server,
+                                                HttpTunnelType_t::HTTP_SERVER, "bg revalidation server");
+
+    // Set up consumer: cache write
+    setup_cache_write_transfer(&cache_sm, server_entry->vc, &t_state.cache_info.object_store, 0, "bg reval cache write");
+
+    server_entry->in_tunnel = true;
+    tunnel.tunnel_run(p);
+
+  } else {
+    // Other status codes (4xx, 5xx) - revalidation failed
+    SMDbg(dbg_ctl_http, "Background revalidation: unexpected status %d - treating as failure", static_cast<int>(status));
+    cleanup_background_revalidation(false);
+    terminate_sm = true;
+  }
+
+  return 0;
+}
+
+//////////////////////////////////////////////////////////////////////////
+//
+//  HttpSM::tunnel_handler_bg_cache_fill()
+//
+//  Handles completion of background cache fill during stale-while-revalidate.
+//  Called when the origin → cache tunnel completes.
+//
+//////////////////////////////////////////////////////////////////////////
+int
+HttpSM::tunnel_handler_bg_cache_fill(int event, void *data)
+{
+  STATE_ENTER(&HttpSM::tunnel_handler_bg_cache_fill, event);
+
+  ink_assert(event == HTTP_TUNNEL_EVENT_DONE);
+  ink_assert(data == &tunnel);
+  ink_assert(cache_sm.doing_stale_while_reval);
+
+  // Check if both the origin read and cache write succeeded
+  HttpTunnelProducer *p              = tunnel.get_producer(server_entry->vc);
+  HttpTunnelConsumer *cache_consumer = cache_sm.cache_write_vc ? tunnel.get_consumer(cache_sm.cache_write_vc) : nullptr;
+
+  bool origin_success  = (p && p->read_success);
+  bool cache_success   = (cache_consumer && cache_consumer->write_success);
+  bool overall_success = origin_success && cache_success;
+
+  SMDbg(dbg_ctl_http, "Background cache fill completed: origin=%s cache=%s overall=%s", origin_success ? "success" : "failed",
+        cache_success ? "success" : "failed", overall_success ? "success" : "failed");
+
+  // Update RevalidationEntry state based on cache write result
+  if (cache_sm.reval_entry) {
+    if (overall_success) {
+      cache_sm.reval_entry->state = RevalidationEntry::State::COMPLETING;
+      SMDbg(dbg_ctl_http, "Marked RevalidationEntry as COMPLETING");
+    } else {
+      cache_sm.reval_entry->state = RevalidationEntry::State::FAILED;
+      SMDbg(dbg_ctl_http, "Marked RevalidationEntry as FAILED");
+    }
+  }
+
+  // Cleanup the background revalidation
+  cleanup_background_revalidation(overall_success);
+
+  // Terminate the state machine - client already got their response
+  terminate_sm = true;
+
+  return 0;
+}
+
+//////////////////////////////////////////////////////////////////////////
+//
+//  HttpSM::cleanup_background_revalidation()
+//
+//  Cleanup after background revalidation completes (success or failure).
+//  Updates RevalidationDir state and closes connections.
+//
+//////////////////////////////////////////////////////////////////////////
+void
+HttpSM::cleanup_background_revalidation(bool success)
+{
+  SMDbg(dbg_ctl_http, "Cleaning up background revalidation: %s", success ? "success" : "failed");
+
+  // Update stats
+  if (success) {
+    Metrics::Counter::increment(http_rsb.cache_updates);
+  }
+
+  // Cleanup HttpCacheSM state
+  cache_sm.end_stale_while_reval();
+
+  // Close server connection
+  if (server_entry) {
+    if (server_txn) {
+      server_txn->do_io_close();
+    }
+    vc_table.cleanup_entry(server_entry);
+    server_entry = nullptr;
+  }
+
+  SMDbg(dbg_ctl_http, "Background revalidation cleanup complete");
+}
+
 void
 HttpSM::setup_client_response_plugin_agents(HttpTunnelProducer *p, int num_header_bytes)
 {
@@ -8205,33 +8630,44 @@ HttpSM::set_next_state()
     ink_assert(t_state.cache_info.action == HttpTransact::CacheAction_t::SERVE ||
                t_state.cache_info.action == HttpTransact::CacheAction_t::SERVE_AND_DELETE ||
                t_state.cache_info.action == HttpTransact::CacheAction_t::SERVE_AND_UPDATE);
-    release_server_session(true);
-    t_state.source = HttpTransact::Source_t::CACHE;
 
-    if (transform_info.vc) {
-      ink_assert(t_state.hdr_info.client_response.valid() == 0);
-      ink_assert((t_state.hdr_info.transform_response.valid() ? true : false) == true);
-      do_drain_request_body(t_state.hdr_info.transform_response);
-      t_state.hdr_info.cache_response.create(HTTPType::RESPONSE);
-      t_state.hdr_info.cache_response.copy(&t_state.hdr_info.transform_response);
-
-      HttpTunnelProducer *p = setup_cache_transfer_to_transform();
-      perform_cache_write_action();
-      tunnel.tunnel_run(p);
+    // Check if this is a stale-while-revalidate scenario
+    if (t_state.cache_lookup_result == HttpTransact::CacheLookupResult_t::HIT_STALE_SERVE_WHILE_REVAL &&
+        t_state.txn_conf->swr_mode > 0) {
+      // Special handling for stale-while-revalidate:
+      // 1. Serve stale content to client immediately
+      // 2. Initiate background revalidation in parallel
+      setup_stale_while_revalidate_transfer();
     } else {
-      ink_assert((t_state.hdr_info.client_response.valid() ? true : false) == true);
-      do_drain_request_body(t_state.hdr_info.client_response);
-      t_state.hdr_info.cache_response.create(HTTPType::RESPONSE);
-      t_state.hdr_info.cache_response.copy(&t_state.hdr_info.client_response);
+      // Normal cache serve path
+      release_server_session(true);
+      t_state.source = HttpTransact::Source_t::CACHE;
 
-      perform_cache_write_action();
-      t_state.api_next_action = HttpTransact::StateMachineAction_t::API_SEND_RESPONSE_HDR;
+      if (transform_info.vc) {
+        ink_assert(t_state.hdr_info.client_response.valid() == 0);
+        ink_assert((t_state.hdr_info.transform_response.valid() ? true : false) == true);
+        do_drain_request_body(t_state.hdr_info.transform_response);
+        t_state.hdr_info.cache_response.create(HTTPType::RESPONSE);
+        t_state.hdr_info.cache_response.copy(&t_state.hdr_info.transform_response);
 
-      // check to see if there is a plugin hook set
-      if (hooks_set) {
-        do_api_callout_internal();
+        HttpTunnelProducer *p = setup_cache_transfer_to_transform();
+        perform_cache_write_action();
+        tunnel.tunnel_run(p);
       } else {
-        handle_api_return();
+        ink_assert((t_state.hdr_info.client_response.valid() ? true : false) == true);
+        do_drain_request_body(t_state.hdr_info.client_response);
+        t_state.hdr_info.cache_response.create(HTTPType::RESPONSE);
+        t_state.hdr_info.cache_response.copy(&t_state.hdr_info.client_response);
+
+        perform_cache_write_action();
+        t_state.api_next_action = HttpTransact::StateMachineAction_t::API_SEND_RESPONSE_HDR;
+
+        // check to see if there is a plugin hook set
+        if (hooks_set) {
+          do_api_callout_internal();
+        } else {
+          handle_api_return();
+        }
       }
     }
     break;

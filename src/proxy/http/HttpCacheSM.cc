@@ -27,6 +27,8 @@
 #include "proxy/http/HttpDebugNames.h"
 
 #include "iocore/cache/Cache.h"
+#include "../../iocore/cache/P_CacheDir.h"
+#include "../../iocore/cache/CacheVC.h"
 #include "tscore/ink_assert.h"
 
 #define SM_REMEMBER(sm, e, r)                          \
@@ -442,4 +444,166 @@ HttpCacheSM::open_write(const HttpCacheKey *key, URL *url, HTTPHdr *request, Cac
       return ACTION_RESULT_DONE;
     }
   }
+}
+
+/**
+ * Check RevalidationDir before initiating a cache read.
+ * Returns true if a revalidation is already in progress for this key.
+ * Uses per-stripe reval_dir from the cache_read_vc.
+ */
+bool
+HttpCacheSM::check_reval_dir_before_read(const HttpCacheKey *key)
+{
+  // Need cache_read_vc to get stripe
+  if (!cache_read_vc) {
+    return false;
+  }
+
+  CacheVC *vc = reinterpret_cast<CacheVC *>(cache_read_vc);
+  if (!vc->stripe || !vc->stripe->reval_dir) {
+    return false;
+  }
+
+  const CacheKey *cache_key = &key->hash;
+
+  // Look for an existing revalidation entry in this stripe's directory
+  RevalidationEntry *entry = vc->stripe->reval_dir->find_entry(cache_key);
+
+  if (entry) {
+    Dbg(dbg_ctl_http_cache, "[%" PRId64 "] Found existing revalidation for this URL in stripe %s", master_sm->sm_id,
+        vc->stripe->hash_text.get());
+
+    if (entry->state == RevalidationEntry::State::FETCHING_NEW) {
+      // Revalidation in progress - we could wait or serve stale
+      // For now, just return true to indicate revalidation exists
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Initialize a stale-while-revalidate operation.
+ * Creates/finds RevalidationEntry in the per-stripe directory and sets up tracking.
+ * Uses the stripe from cache_read_vc to ensure proper URL→stripe hashing.
+ */
+bool
+HttpCacheSM::init_stale_while_revalidate(const HttpCacheKey *old_key, const HttpCacheKey *new_key)
+{
+  (void)new_key;
+
+  // Must have cache_read_vc to get stripe
+  if (!cache_read_vc) {
+    Dbg(dbg_ctl_http_cache, "[%" PRId64 "] No cache_read_vc for stale-while-revalidate", master_sm->sm_id);
+    return false;
+  }
+
+  CacheVC *vc = reinterpret_cast<CacheVC *>(cache_read_vc);
+  if (!vc->stripe || !vc->stripe->reval_dir) {
+    Dbg(dbg_ctl_http_cache, "[%" PRId64 "] Stripe or RevalidationDir not initialized", master_sm->sm_id);
+    return false;
+  }
+
+  const CacheKey *cache_key = &old_key->hash;
+
+  reval_entry = vc->stripe->reval_dir->find_or_create_entry(cache_key, cache_key, nullptr, vc->stripe);
+  if (!reval_entry) {
+    Dbg(dbg_ctl_http_cache, "[%" PRId64 "] Failed to create RevalidationEntry in stripe %s", master_sm->sm_id,
+        vc->stripe->hash_text.get());
+    return false;
+  }
+
+  // Check if another transaction is already fetching new content (single writer check)
+  if (reval_entry->state == RevalidationEntry::State::FETCHING_NEW) {
+    // Another transaction is already doing background revalidation
+    // Just serve stale content without initiating a new fetch
+    Dbg(dbg_ctl_http_cache, "[%" PRId64 "] Revalidation already in progress for this URL, serving stale only", master_sm->sm_id);
+
+    reval_entry->active_stale_readers++;
+    reval_entry->num_clients_served_stale++;
+
+    stale_read_vc           = cache_read_vc;
+    cache_read_vc           = nullptr;
+    doing_stale_while_reval = true;
+
+    Dbg(dbg_ctl_http_cache, "[%" PRId64 "] Joined existing revalidation, active_readers=%d", master_sm->sm_id,
+        reval_entry->active_stale_readers.load());
+
+    // Return true but SM will detect we didn't set state to FETCHING_NEW
+    // and will skip initiating background fetch
+    return true;
+  }
+
+  // We're the first transaction - mark that we'll start the fetch
+  reval_entry->state = RevalidationEntry::State::FETCHING_NEW;
+
+  // Increment active reader count
+  reval_entry->active_stale_readers++;
+  reval_entry->num_clients_served_stale++;
+
+  Dbg(dbg_ctl_http_cache, "[%" PRId64 "] Initialized stale-while-revalidate in stripe %s, active_readers=%d, starting fetch",
+      master_sm->sm_id, vc->stripe->hash_text.get(), reval_entry->active_stale_readers.load());
+
+  stale_read_vc           = cache_read_vc;
+  cache_read_vc           = nullptr;
+  doing_stale_while_reval = true;
+
+  return true;
+}
+
+/**
+ * Cleanup revalidation entry when done.
+ * Updates RevalidationDir state and removes entry if no longer needed.
+ */
+void
+HttpCacheSM::cleanup_reval_entry()
+{
+  if (!reval_entry) {
+    return;
+  }
+
+  // Get stripe from stale_read_vc to access its reval_dir
+  CacheVC *vc = stale_read_vc ? reinterpret_cast<CacheVC *>(stale_read_vc) : nullptr;
+  if (!vc || !vc->stripe || !vc->stripe->reval_dir) {
+    Dbg(dbg_ctl_http_cache, "[%" PRId64 "] Cannot cleanup - no stripe/reval_dir access", master_sm->sm_id);
+    reval_entry = nullptr;
+    return;
+  }
+
+  // Decrement active reader count
+  int readers = --reval_entry->active_stale_readers;
+
+  Dbg(dbg_ctl_http_cache, "[%" PRId64 "] Cleaning up RevalidationEntry in stripe %s, remaining active_readers=%d", master_sm->sm_id,
+      vc->stripe->hash_text.get(), readers);
+
+  if (readers <= 0 &&
+      (reval_entry->state == RevalidationEntry::State::COMPLETING || reval_entry->state == RevalidationEntry::State::FAILED)) {
+    vc->stripe->reval_dir->remove_entry(reval_entry);
+  }
+
+  reval_entry = nullptr;
+}
+/**
+ * Close the stale read VC (separate from the new write VC)
+ */
+void
+HttpCacheSM::close_stale_read()
+{
+  if (stale_read_vc) {
+    Metrics::Gauge::decrement(http_rsb.current_cache_connections);
+    stale_read_vc->do_io_close();
+    stale_read_vc = nullptr;
+  }
+}
+
+/**
+ * Complete cleanup of stale-while-revalidate operation
+ */
+void
+HttpCacheSM::end_stale_while_reval()
+{
+  close_stale_read();
+  cleanup_reval_entry();
+  doing_stale_while_reval = false;
 }

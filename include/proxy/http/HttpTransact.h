@@ -438,7 +438,7 @@ public:
     ALL,
   };
 
-  enum class CacheLookupResult_t { NONE, MISS, DOC_BUSY, HIT_STALE, HIT_WARNING, HIT_FRESH, SKIPPED };
+  enum class CacheLookupResult_t { NONE, MISS, DOC_BUSY, HIT_STALE, HIT_STALE_SERVE_WHILE_REVAL, HIT_WARNING, HIT_FRESH, SKIPPED };
 
   enum class UpdateCachedObject_t { NONE, PREPARE, CONTINUE, ERROR, SUCCEED, FAIL };
 
@@ -1102,10 +1102,12 @@ public:
   static void handle_content_length_header(State *s, HTTPHdr *header, HTTPHdr *base);
   static void change_response_header_because_of_range_request(State *s, HTTPHdr *header);
 
-  static void             handle_request_keep_alive_headers(State *s, HTTPVersion ver, HTTPHdr *heads);
-  static void             handle_response_keep_alive_headers(State *s, HTTPVersion ver, HTTPHdr *heads);
-  static int              get_max_age(HTTPHdr *response);
-  static int              calculate_document_freshness_limit(State *s, HTTPHdr *response, time_t response_date, bool *heuristic);
+  static void handle_request_keep_alive_headers(State *s, HTTPVersion ver, HTTPHdr *heads);
+  static void handle_response_keep_alive_headers(State *s, HTTPVersion ver, HTTPHdr *heads);
+  static int  get_max_age(HTTPHdr *response);
+  static int  calculate_document_freshness_limit(State *s, HTTPHdr *response, time_t response_date, bool *heuristic);
+  static int  get_stale_while_revalidate_value(HTTPHdr *response, const OverridableHttpConfigParams *config);
+  static bool is_stale_while_revalidate_applicable(State *s, HTTPHdr *cached_response, ink_time_t current_age, int fresh_limit);
   static Freshness_t      what_is_document_freshness(State *s, HTTPHdr *client_request, HTTPHdr *cached_obj_response,
                                                      bool evaluate_actual_freshness = false);
   static Authentication_t AuthenticationNeeded(const OverridableHttpConfigParams *p, HTTPHdr *client_request,

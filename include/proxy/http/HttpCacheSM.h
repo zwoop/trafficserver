@@ -38,6 +38,7 @@
 #include "proxy/hdrs/HTTP.h"
 #include "proxy/http/HttpConfig.h"
 
+struct RevalidationEntry;
 class HttpSM;
 class HttpCacheSM;
 
@@ -94,8 +95,11 @@ public:
   Action *open_write(const HttpCacheKey *key, URL *url, HTTPHdr *request, CacheHTTPInfo *old_info, time_t pin_in_cache, bool retry,
                      bool allow_multiple);
 
-  CacheVConnection *cache_read_vc  = nullptr;
-  CacheVConnection *cache_write_vc = nullptr;
+  CacheVConnection  *cache_read_vc           = nullptr;
+  CacheVConnection  *stale_read_vc           = nullptr;
+  RevalidationEntry *reval_entry             = nullptr;
+  bool               doing_stale_while_reval = false;
+  CacheVConnection  *cache_write_vc          = nullptr;
 
   // Flag to check whether read-while-write is in progress or not
   bool readwhilewrite_inprogress = false;
@@ -226,6 +230,12 @@ public:
     abort_write();
   }
 
+  bool check_reval_dir_before_read(const HttpCacheKey *key);
+  bool init_stale_while_revalidate(const HttpCacheKey *old_key, const HttpCacheKey *new_key);
+  void cleanup_reval_entry();
+  void close_stale_read();
+  void end_stale_while_reval();
+
   int
   get_last_error() const
   {
@@ -305,4 +315,9 @@ private:
 
   // last error from the cache subsystem
   int err_code = 0;
+
+public:
+  // Track total retry attempts across both read and write operations
+  static constexpr int MAX_TOTAL_RETRIES    = 20;
+  int                  total_retry_attempts = 0;
 };

@@ -1106,6 +1106,12 @@ HttpConfig::startup()
 
   HttpEstablishStaticConfigLongLong(c.oride.cache_max_stale_age, "proxy.config.http.cache.max_stale_age");
 
+  // Stale-While-Revalidate configuration
+  HttpEstablishStaticConfigLongLong(c.oride.swr_mode, "proxy.config.http.cache.swr.mode");
+  HttpEstablishStaticConfigLongLong(c.oride.swr_max_age, "proxy.config.http.cache.swr.max_age");
+  HttpEstablishStaticConfigLongLong(c.oride.swr_default_value, "proxy.config.http.cache.swr.default_value");
+  HttpEstablishStaticConfigByte(c.oride.swr_honor_cache_control, "proxy.config.http.cache.swr.honor_cache_control");
+
   HttpEstablishStaticConfigByte(c.oride.srv_enabled, "proxy.config.srv_enabled");
 
   HttpEstablishStaticConfigByte(c.oride.allow_half_open, "proxy.config.http.allow_half_open");
@@ -1410,6 +1416,12 @@ HttpConfig::reconfigure()
   params->oride.cache_guaranteed_max_lifetime = m_master.oride.cache_guaranteed_max_lifetime;
 
   params->oride.cache_max_stale_age = m_master.oride.cache_max_stale_age;
+
+  // Stale-While-Revalidate configuration
+  params->oride.swr_mode                = m_master.oride.swr_mode;
+  params->oride.swr_max_age             = m_master.oride.swr_max_age;
+  params->oride.swr_default_value       = m_master.oride.swr_default_value;
+  params->oride.swr_honor_cache_control = m_master.oride.swr_honor_cache_control;
 
   params->oride.srv_enabled = m_master.oride.srv_enabled;
 

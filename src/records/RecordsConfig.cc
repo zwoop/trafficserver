@@ -662,6 +662,20 @@ static constexpr RecordElement RecordsConfig[] =
   {RECT_CONFIG, "proxy.config.http.cache.guaranteed_max_lifetime", RECD_INT, "31536000", RECU_DYNAMIC, RR_NULL, RECC_NULL, nullptr, RECA_NULL}
   ,
 
+  //        ##############################
+  //        # Stale-While-Revalidate     #
+  //        ##############################
+  //  # Mode: 0=disabled, 1=RFC5861 strict, 2=config-driven, 3=hybrid (default: 0)
+  {RECT_CONFIG, "proxy.config.http.cache.swr.mode", RECD_INT, "0", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-3]", RECA_NULL}
+  ,
+  {RECT_CONFIG, "proxy.config.http.cache.swr.max_age", RECD_INT, "3600", RECU_DYNAMIC, RR_NULL, RECC_STR, "^[0-9]+$", RECA_NULL}
+  ,
+  {RECT_CONFIG, "proxy.config.http.cache.swr.default_value", RECD_INT, "0", RECU_DYNAMIC, RR_NULL, RECC_STR, "^[0-9]+$", RECA_NULL}
+  ,
+  {RECT_CONFIG, "proxy.config.http.cache.swr.honor_cache_control", RECD_INT, "1", RECU_DYNAMIC, RR_NULL, RECC_INT, "[0-1]", RECA_NULL}
+  ,
+  {RECT_CONFIG, "proxy.config.http.cache.swr.buckets", RECD_INT, "128", RECU_RESTART_TS, RR_NULL, RECC_INT, "[16-4096]", RECA_NULL}
+  ,
   //        ###################
   //        # Cache Compat    #
   //        ###################
